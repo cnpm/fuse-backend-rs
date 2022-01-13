@@ -18,8 +18,13 @@ use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-
 use arc_swap::ArcSwap;
+
+#[cfg(target_os = "linux")]
+use libc::{stat64};
+
+#[cfg(target_os = "macos")]
+use libc::{stat as stat64};
 
 use crate::abi::linux_abi::Attr;
 use crate::api::filesystem::*;
@@ -262,7 +267,7 @@ impl<S: BitmapSlice> PseudoFs<S> {
             ..Default::default()
         };
         attr.ino = ino;
-        attr.mode = libc::S_IFDIR | libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO;
+        attr.mode = (libc::S_IFDIR | libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO) as u32;
         let now = SystemTime::now();
         attr.ctime = now
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -354,7 +359,7 @@ impl<S: BitmapSlice> FileSystem<S> for PseudoFs<S> {
         }
     }
 
-    fn getattr(&self, _: &Context, inode: u64, _: Option<u64>) -> Result<(libc::stat64, Duration)> {
+    fn getattr(&self, _: &Context, inode: u64, _: Option<u64>) -> Result<(stat64, Duration)> {
         let ino = self
             .inodes
             .load()

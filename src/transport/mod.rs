@@ -30,10 +30,15 @@ pub mod virtiofs;
 #[cfg(feature = "virtiofs")]
 pub use self::virtiofs::{Error, FsCacheReqHandler, Result, Writer};
 
-#[cfg(all(feature = "fusedev", not(feature = "virtiofs")))]
+#[cfg(all(feature = "fusedev", not(feature = "virtiofs"), not(feature = "macfuse")))]
 pub mod fusedev;
-#[cfg(all(feature = "fusedev", not(feature = "virtiofs")))]
+#[cfg(all(feature = "fusedev", not(feature = "virtiofs"), not(feature = "macfuse")))]
 pub use self::fusedev::{Error, FsCacheReqHandler, FuseBuf, FuseSession, Result, Writer};
+
+#[cfg(all(feature = "macfuse", not(feature = "virtiofs"), not(feature = "fusedev")))]
+pub mod macfuse;
+#[cfg(all(feature = "macfuse", not(feature = "virtiofs"), not(feature = "fusedev")))]
+pub use self::macfuse::{Error, FsCacheReqHandler, FuseBuf, FuseSession, Result, Writer};
 
 #[derive(Clone)]
 struct IoBuffers<'a, S> {

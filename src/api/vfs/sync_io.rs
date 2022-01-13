@@ -1,6 +1,12 @@
 // Copyright 2020 Ant Financial. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(target_os = "linux")]
+use libc::{stat64, statvfs64};
+
+#[cfg(target_os = "macos")]
+use libc::{stat as stat64, statvfs as statvfs64};
+
 use super::*;
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::abi::virtio_fs;
@@ -93,7 +99,7 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         ctx: &Context,
         inode: VfsInode,
         handle: Option<VfsHandle>,
-    ) -> Result<(libc::stat64, Duration)> {
+    ) -> Result<(stat64, Duration)> {
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.getattr(ctx, idata.ino(), handle),
             (Right(fs), idata) => fs.getattr(ctx, idata.ino(), handle),
@@ -104,10 +110,10 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         &self,
         ctx: &Context,
         inode: VfsInode,
-        attr: libc::stat64,
+        attr: stat64,
         handle: Option<u64>,
         valid: SetattrValid,
-    ) -> Result<(libc::stat64, Duration)> {
+    ) -> Result<(stat64, Duration)> {
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.setattr(ctx, idata.ino(), attr, handle, valid),
             (Right(fs), idata) => fs.setattr(ctx, idata.ino(), attr, handle, valid),
@@ -411,7 +417,7 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         }
     }
 
-    fn statfs(&self, ctx: &Context, inode: VfsInode) -> Result<libc::statvfs64> {
+    fn statfs(&self, ctx: &Context, inode: VfsInode) -> Result<statvfs64> {
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.statfs(ctx, idata.ino()),
             (Right(fs), idata) => fs.statfs(ctx, idata.ino()),

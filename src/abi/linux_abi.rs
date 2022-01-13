@@ -11,13 +11,20 @@ use std::mem;
 use bitflags::bitflags;
 use vm_memory::ByteValued;
 
-use libc::{blksize_t, nlink_t};
+#[cfg(target_os = "linux")]
+use libc::{blksize_t, nlink_t, stat64, statvfs64};
+
+#[cfg(target_os = "macos")]
+use libc::{blksize_t, nlink_t, stat as stat64, statvfs as statvfs64 };
 
 /// Version number of this interface.
 pub const KERNEL_VERSION: u32 = 7;
 
 /// Minor version number of this interface.
+#[cfg(target_os = "linux")]
 pub const KERNEL_MINOR_VERSION: u32 = 33;
+#[cfg(target_os = "macos")]
+pub const KERNEL_MINOR_VERSION: u32 = 31;
 
 /// Init reply size is FUSE_COMPAT_INIT_OUT_SIZE
 pub const KERNEL_MINOR_VERSION_INIT_OUT_SIZE: u32 = 5;
@@ -545,27 +552,34 @@ pub struct Attr {
     pub atime: u64,
     pub mtime: u64,
     pub ctime: u64,
+    #[cfg(target_os = "macos")]
+    pub	crtime: u64,
     pub atimensec: u32,
     pub mtimensec: u32,
     pub ctimensec: u32,
+    #[cfg(target_os = "macos")]
+    pub crtimensec: u32,
     pub mode: u32,
     pub nlink: u32,
     pub uid: u32,
     pub gid: u32,
     pub rdev: u32,
+    #[cfg(target_os = "macos")]
+    pub flags: u32,
     pub blksize: u32,
+    #[cfg(target_os = "linux")]
     pub flags: u32,
 }
 unsafe impl ByteValued for Attr {}
 
-impl From<libc::stat64> for Attr {
-    fn from(st: libc::stat64) -> Attr {
+impl From<stat64> for Attr {
+    fn from(st: stat64) -> Attr {
         Attr::with_flags(st, 0)
     }
 }
 
 impl Attr {
-    pub fn with_flags(st: libc::stat64, flags: u32) -> Attr {
+    pub fn with_flags(st: stat64, flags: u32) -> Attr {
         Attr {
             ino: st.st_ino,
             size: st.st_size as u64,
@@ -576,21 +590,23 @@ impl Attr {
             atimensec: st.st_atime_nsec as u32,
             mtimensec: st.st_mtime_nsec as u32,
             ctimensec: st.st_ctime_nsec as u32,
-            mode: st.st_mode,
+            mode: st.st_mode as u32,
             nlink: st.st_nlink as u32,
             uid: st.st_uid,
             gid: st.st_gid,
             rdev: st.st_rdev as u32,
             blksize: st.st_blksize as u32,
             flags: flags as u32,
+            crtime: 0,
+            crtimensec: 0,
         }
     }
 }
 
-impl From<Attr> for libc::stat64 {
-    fn from(attr: Attr) -> libc::stat64 {
+impl From<Attr> for stat64 {
+    fn from(attr: Attr) -> stat64 {
         // Safe because we are zero-initializing a struct
-        let mut out: libc::stat64 = unsafe { mem::zeroed() };
+        let mut out: stat64 = unsafe { mem::zeroed() };
         out.st_ino = attr.ino;
         out.st_size = attr.size as i64;
         out.st_blocks = attr.blocks as i64;
@@ -600,11 +616,11 @@ impl From<Attr> for libc::stat64 {
         out.st_atime_nsec = attr.atimensec as i64;
         out.st_mtime_nsec = attr.mtimensec as i64;
         out.st_ctime_nsec = attr.ctimensec as i64;
-        out.st_mode = attr.mode;
+        out.st_mode = attr.mode as libc::mode_t;
         out.st_nlink = attr.nlink as nlink_t;
         out.st_uid = attr.uid;
         out.st_gid = attr.gid;
-        out.st_rdev = attr.rdev as u64;
+        out.st_rdev = attr.rdev as libc::dev_t;
         out.st_blksize = attr.blksize as blksize_t;
 
         out
@@ -627,14 +643,14 @@ pub struct Kstatfs {
 }
 unsafe impl ByteValued for Kstatfs {}
 
-impl From<libc::statvfs64> for Kstatfs {
-    fn from(st: libc::statvfs64) -> Self {
+impl From<statvfs64> for Kstatfs {
+    fn from(st: statvfs64) -> Self {
         Kstatfs {
-            blocks: st.f_blocks,
-            bfree: st.f_bfree,
-            bavail: st.f_bavail,
-            files: st.f_files,
-            ffree: st.f_ffree,
+            blocks: st.f_blocks as u64,
+            bfree: st.f_bfree as u64,
+            bavail: st.f_bavail as u64,
+            files: st.f_files as u64,
+            ffree: st.f_ffree as u64,
             bsize: st.f_bsize as u32,
             namelen: st.f_namemax as u32,
             frsize: st.f_frsize as u32,
@@ -808,6 +824,10 @@ unsafe impl ByteValued for MkdirIn {}
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RenameIn {
     pub newdir: u64,
+    #[cfg(target_os = "macos")]
+    pub flags: u32,
+    #[cfg(target_os = "macos")]
+    pub padding: u32,
 }
 unsafe impl ByteValued for RenameIn {}
 
@@ -849,11 +869,11 @@ pub struct SetattrIn {
 }
 unsafe impl ByteValued for SetattrIn {}
 
-impl From<SetattrIn> for libc::stat64 {
-    fn from(setattr: SetattrIn) -> libc::stat64 {
+impl From<SetattrIn> for stat64 {
+    fn from(setattr: SetattrIn) -> stat64 {
         // Safe because we are zero-initializing a struct with only POD fields.
-        let mut out: libc::stat64 = unsafe { mem::zeroed() };
-        out.st_mode = setattr.mode;
+        let mut out: stat64 = unsafe { mem::zeroed() };
+        out.st_mode = setattr.mode as libc::mode_t;
         out.st_uid = setattr.uid;
         out.st_gid = setattr.gid;
         out.st_size = setattr.size as i64;
@@ -978,6 +998,10 @@ unsafe impl ByteValued for SetxattrIn {}
 pub struct GetxattrIn {
     pub size: u32,
     pub padding: u32,
+    #[cfg(target_os = "macos")]
+    pub	position: u32,
+    #[cfg(target_os = "macos")]
+    pub	padding2: u32,
 }
 unsafe impl ByteValued for GetxattrIn {}
 

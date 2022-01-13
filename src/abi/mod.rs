@@ -3,7 +3,6 @@
 
 //! Fuse Application Binary Interfaces(ABI).
 
-#[cfg(target_os = "linux")]
 /// Linux Fuse Application Binary Interfaces.
 pub mod linux_abi;
 

@@ -9,7 +9,11 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-
+#[cfg(target_os = "macos")]
+use libc::{
+    stat as stat64,
+    statvfs as statvfs64,
+};
 use super::{
     BitmapSlice, Context, DirEntry, Entry, GetxattrReply, ListxattrReply, ZeroCopyReader,
     ZeroCopyWriter,
@@ -112,7 +116,7 @@ pub trait FileSystem<S: BitmapSlice = ()> {
         ctx: &Context,
         inode: Self::Inode,
         handle: Option<Self::Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(stat64, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -137,10 +141,10 @@ pub trait FileSystem<S: BitmapSlice = ()> {
         &self,
         ctx: &Context,
         inode: Self::Inode,
-        attr: libc::stat64,
+        attr: stat64,
         handle: Option<Self::Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(stat64, Duration)> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
@@ -519,9 +523,9 @@ pub trait FileSystem<S: BitmapSlice = ()> {
     }
 
     /// Get information about the file system.
-    fn statfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<libc::statvfs64> {
+    fn statfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<statvfs64> {
         // Safe because we are zero-initializing a struct with only POD fields.
-        let mut st: libc::statvfs64 = unsafe { mem::zeroed() };
+        let mut st: statvfs64 = unsafe { mem::zeroed() };
 
         // This matches the behavior of libfuse as it returns these values if the
         // filesystem doesn't implement this method.
@@ -877,7 +881,7 @@ impl<FS: FileSystem<S>, S: BitmapSlice> FileSystem<S> for Arc<FS> {
         ctx: &Context,
         inode: Self::Inode,
         handle: Option<Self::Handle>,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(stat64, Duration)> {
         self.deref().getattr(ctx, inode, handle)
     }
 
@@ -885,10 +889,10 @@ impl<FS: FileSystem<S>, S: BitmapSlice> FileSystem<S> for Arc<FS> {
         &self,
         ctx: &Context,
         inode: Self::Inode,
-        attr: libc::stat64,
+        attr: stat64,
         handle: Option<Self::Handle>,
         valid: SetattrValid,
-    ) -> io::Result<(libc::stat64, Duration)> {
+    ) -> io::Result<(stat64, Duration)> {
         self.deref().setattr(ctx, inode, attr, handle, valid)
     }
 
@@ -1071,7 +1075,7 @@ impl<FS: FileSystem<S>, S: BitmapSlice> FileSystem<S> for Arc<FS> {
             .release(ctx, inode, flags, handle, flush, flock_release, lock_owner)
     }
 
-    fn statfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<libc::statvfs64> {
+    fn statfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<statvfs64> {
         self.deref().statfs(ctx, inode)
     }
 

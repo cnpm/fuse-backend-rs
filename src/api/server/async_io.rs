@@ -9,6 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use vm_memory::ByteValued;
 
+#[cfg(target_os = "linux")]
+use libc::{stat64};
+
+#[cfg(target_os = "macos")]
+use libc::{stat as stat64};
+
 use super::{MetricsHook, Server, ServerUtil, SrvContext, MAX_BUFFER_SIZE};
 use crate::abi::linux_abi::*;
 use crate::api::filesystem::{
@@ -263,7 +269,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
             None
         };
         let valid = SetattrValid::from_bits_truncate(setattr_in.valid);
-        let st: libc::stat64 = setattr_in.into();
+        let st: stat64 = setattr_in.into();
         let result = self
             .fs
             .async_setattr(ctx.context(), ctx.nodeid(), st, handle, valid)
@@ -590,7 +596,7 @@ impl<'a, F: AsyncFileSystem<D, S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a,
 
     async fn async_handle_attr_result(
         &mut self,
-        result: io::Result<(libc::stat64, Duration)>,
+        result: io::Result<(stat64, Duration)>,
     ) -> Result<usize> {
         match result {
             Ok((st, timeout)) => {

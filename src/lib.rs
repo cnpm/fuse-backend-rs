@@ -106,6 +106,8 @@ pub type Result<T> = ::std::result::Result<T, Error>;
 
 pub mod abi;
 pub mod api;
+
+#[cfg(all(feature = "fusedev", feature = "virtiofs", not(feature = "macfuse")))]
 pub mod passthrough;
 pub mod transport;
 
