@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::os::unix::io::RawFd;
 
-use nix::sys::uio::{pwrite, writev, IoVec};
+use nix::sys::uio::{writev, IoVec};
 use vm_memory::{ByteValued, VolatileMemory, VolatileMemoryError, VolatileSlice};
 
 use super::{FileReadWriteVolatile, IoBuffers, Reader};
@@ -176,8 +176,8 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
         let o = other.map(|v| v.buf.as_slice()).unwrap_or(&[]);
         let res = match (self.buf.len(), o.len()) {
             (0, 0) => Ok(0),
-            (0, _) => pwrite(self.fd, o, 0),
-            (_, 0) => pwrite(self.fd, self.buf.as_slice(), 0),
+            (0, _) => write(self.fd, o),
+            (_, 0) => write(self.fd, self.buf.as_slice()),
             (_, _) => {
                 let bufs = [IoVec::from_slice(self.buf.as_slice()), IoVec::from_slice(o)];
                 writev(self.fd, &bufs)
@@ -311,11 +311,19 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
     }
 
     fn do_write(fd: RawFd, data: &[u8]) -> io::Result<usize> {
-        pwrite(fd, data, 0).map_err(|e| {
+        write(fd, data).map_err(|e| {
             error! {"fail to write to fuse device fd {}: {}, {:?}", fd, e, data};
             io::Error::new(io::ErrorKind::Other, format!("{}", e))
         })
     }
+}
+
+fn write(fd: RawFd, buf:&[u8]) -> std::result::Result<usize, nix::errno::Errno> {
+    let res = unsafe {
+        libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len() as libc::size_t)
+    };
+
+    nix::errno::Errno::result(res).map(|r| r as usize)
 }
 
 impl<'a, S: BitmapSlice> io::Write for Writer<'a, S> {

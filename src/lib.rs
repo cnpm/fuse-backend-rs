@@ -56,6 +56,10 @@ extern crate vm_memory;
 #[cfg(feature = "virtiofs")]
 extern crate vm_virtio;
 
+#[macro_use]
+extern crate core_foundation;
+extern crate diskarbitration_sys;
+
 use std::ffi::{CStr, FromBytesWithNulError};
 use std::io::ErrorKind;
 use std::{error, fmt, io};

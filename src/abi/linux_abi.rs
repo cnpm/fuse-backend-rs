@@ -24,7 +24,7 @@ pub const KERNEL_VERSION: u32 = 7;
 #[cfg(target_os = "linux")]
 pub const KERNEL_MINOR_VERSION: u32 = 33;
 #[cfg(target_os = "macos")]
-pub const KERNEL_MINOR_VERSION: u32 = 31;
+pub const KERNEL_MINOR_VERSION: u32 = 19;
 
 /// Init reply size is FUSE_COMPAT_INIT_OUT_SIZE
 pub const KERNEL_MINOR_VERSION_INIT_OUT_SIZE: u32 = 5;
@@ -569,6 +569,7 @@ pub struct Attr {
     pub blksize: u32,
     #[cfg(target_os = "linux")]
     pub flags: u32,
+    pub padding: u32,
 }
 unsafe impl ByteValued for Attr {}
 
@@ -599,6 +600,7 @@ impl Attr {
             flags: flags as u32,
             crtime: 0,
             crtimensec: 0,
+            padding: 0,
         }
     }
 }

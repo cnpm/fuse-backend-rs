@@ -14,6 +14,8 @@ use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use libc::{sysconf, _SC_PAGESIZE};
 use nix::errno::Errno;
@@ -66,8 +68,6 @@ impl FuseSession {
 
     /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
     pub fn mount(&mut self) -> Result<()> {
-        // let flags =
-        //     MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME | MsFlags::MS_RDONLY;
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype)?;
 
         self.file = Some(file);
@@ -119,12 +119,12 @@ impl FuseSession {
     }
 
     /// Create a new fuse message channel.
-    pub fn new_channel(&self) -> Result<FuseChannel> {
+    pub fn new_channel(&self, fuse_session_end: Arc<AtomicBool>) -> Result<FuseChannel> {
         if let Some(file) = &self.file {
             let file = file
                 .try_clone()
                 .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
-            FuseChannel::new(file, self.bufsize)
+            FuseChannel::new(file, fuse_session_end, self.bufsize)
         } else {
             Err(SessionFailure("invalid fuse session".to_string()))
         }
@@ -140,12 +140,12 @@ impl Drop for FuseSession {
 /// A fuse channel abstruction. Each session can hold multiple channels.
 pub struct FuseChannel {
     file: File,
-    // poll_ctx: PollContext<u32>,
+    fuse_session_end: Arc<AtomicBool>,
     buf: Vec<u8>,
 }
 
 impl FuseChannel {
-    fn new(file: File, bufsize: usize) -> Result<Self> {
+    fn new(file: File, fuse_session_end: Arc<AtomicBool>, bufsize: usize) -> Result<Self> {
         // let poll_ctx =
         //     PollContext::new().map_err(|e| SessionFailure(format!("epoll create: {}", e)))?;
 
@@ -158,6 +158,7 @@ impl FuseChannel {
 
         Ok(FuseChannel {
             file,
+            fuse_session_end,
             // poll_ctx,
             buf: vec![0x0u8; bufsize],
         })
@@ -172,6 +173,11 @@ impl FuseChannel {
     pub fn get_request(&mut self) -> Result<Option<(Reader, Writer)>> {
         let fd = self.file.as_raw_fd();
         loop {
+            let fuse_session_end = self.fuse_session_end.load(Ordering::SeqCst);
+            if fuse_session_end {
+                return Ok(None);
+            }
+
             match read(fd, &mut self.buf) {
                 Ok(len) => {
                     // ###############################################
@@ -232,20 +238,12 @@ fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str) -> Result<Fil
         let mut mountpoint_argv = String::from(mountpoint.to_str().unwrap());
         let mut mountpoint_argv = CString::new(mountpoint_argv).unwrap();
 
-        let mut o = String::from("-o");
-        let mut o = CString::new(o).unwrap();
-
-        let mut debug = String::from("debug");
-        let mut debug = CString::new(debug).unwrap();
-
         let mut argv = vec![
             mountpoint_argv.into_raw(),
-            o.into_raw(),
-            debug.into_raw(),
         ];
         // let mut argv = ManuallyDrop::new(argv);
         let mut args = macfuse::fuse_args {
-            argc: 3,
+            argc: argv.len() as i32,
             argv: argv.as_mut_ptr(),
             allocated: 0,
         };
@@ -266,25 +264,13 @@ fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str) -> Result<Fil
 
 /// Umount a fuse file system
 fn fuse_kern_umount(mountpoint: &str, file: File) -> Result<()> {
-    let mut fds = [PollFd::new(file.as_raw_fd(), PollFlags::empty())];
-
-    if poll(&mut fds, 0).is_ok() {
-        // POLLERR means the file system is already umounted,
-        // or the connection has been aborted via /sys/fs/fuse/connections/NNN/abort
-        if let Some(event) = fds[0].revents() {
-            if event == PollFlags::POLLERR {
-                return Ok(());
-            }
-        }
-    }
-
-    // Drop to close fuse session fd, otherwise synchronous umount can recurse into filesystem and
-    // cause deadlock.
     drop(file);
-    // TODO mntflages
-    // umount2(mountpoint, MntFlags::MNT_DETACH)
-    // umount2(mountpoint, 0)
-    //     .map_err(|e| SessionFailure(format!("failed to umount {}: {}", mountpoint, e)))
+
+    let mut mountpoint_argv = CString::new(mountpoint).unwrap();
+    let mountpoint_argv = mountpoint_argv.as_ptr();
+    unsafe {
+        macfuse::fuse_unmount_compat22(mountpoint_argv);
+    }
     return Ok(())
 }
 
