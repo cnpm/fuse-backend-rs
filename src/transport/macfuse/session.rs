@@ -24,7 +24,6 @@ use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{getgid, getuid, read};
-// use vmm_sys_util::poll::{PollContext, WatchingEvents};
 
 use super::{Error::SessionFailure, FuseBuf, Reader, Result, Writer, macfuse};
 
@@ -119,7 +118,7 @@ impl FuseSession {
     }
 
     /// Create a new fuse message channel.
-    pub fn new_channel(&self, fuse_session_end: Arc<AtomicBool>) -> Result<FuseChannel> {
+    pub fn new_channel(&self, fuse_session_end: RawFd) -> Result<FuseChannel> {
         if let Some(file) = &self.file {
             let file = file
                 .try_clone()
@@ -140,28 +139,27 @@ impl Drop for FuseSession {
 /// A fuse channel abstruction. Each session can hold multiple channels.
 pub struct FuseChannel {
     file: File,
-    fuse_session_end: Arc<AtomicBool>,
+    pipe_fd: RawFd,
     buf: Vec<u8>,
 }
 
 impl FuseChannel {
-    fn new(file: File, fuse_session_end: Arc<AtomicBool>, bufsize: usize) -> Result<Self> {
-        // let poll_ctx =
-        //     PollContext::new().map_err(|e| SessionFailure(format!("epoll create: {}", e)))?;
-
-        // poll_ctx
-        //     .add_fd_with_events(&file, WatchingEvents::empty().set_read(), FUSE_DEV_EVENT)
-        //     .map_err(|e| SessionFailure(format!("epoll register session fd: {}", e)))?;
-        // poll_ctx
-        //     .add_fd_with_events(&evtfd, WatchingEvents::empty().set_read(), EXIT_FUSE_EVENT)
-        //     .map_err(|e| SessionFailure(format!("epoll register exit fd: {}", e)))?;
-
+    fn new(file: File, pipe_fd: RawFd, bufsize: usize) -> Result<Self> {
         Ok(FuseChannel {
             file,
-            fuse_session_end,
-            // poll_ctx,
+            pipe_fd,
             buf: vec![0x0u8; bufsize],
         })
+    }
+
+    fn wait_exit(&self) -> bool {
+        let pollfd = PollFd::new(self.pipe_fd, PollFlags::POLLRDNORM | PollFlags::POLLRDBAND);
+        let mut pollfds = vec![pollfd];
+        let fd_read = poll(&mut pollfds, 0);
+        match fd_read {
+            Ok(fd_read) => fd_read != 0,
+            Err(_) => true,
+        }
     }
 
     /// Get next available FUSE request from the underlying fuse device file.
@@ -173,8 +171,7 @@ impl FuseChannel {
     pub fn get_request(&mut self) -> Result<Option<(Reader, Writer)>> {
         let fd = self.file.as_raw_fd();
         loop {
-            let fuse_session_end = self.fuse_session_end.load(Ordering::SeqCst);
-            if fuse_session_end {
+            if self.wait_exit() {
                 return Ok(None);
             }
 

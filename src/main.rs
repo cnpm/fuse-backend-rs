@@ -18,6 +18,7 @@ use simple_logger::SimpleLogger;
 
 use std::io;
 use std::io::{ErrorKind, IoSlice, Write};
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -51,11 +52,11 @@ pub enum Error {
 const MAX_BUFFER_SIZE: u32 = 1 << 20;
 
 
-pub(crate) struct FakeFileSystemOne {
-    fuse_session_end: Arc<AtomicBool>,
+pub(crate) struct HelloFileSystem {
+    exit_fd: RawFd,
 }
 
-impl FileSystem for FakeFileSystemOne {
+impl FileSystem for HelloFileSystem {
     type Inode = u64;
     type Handle = u64;
     fn lookup(&self, _: &Context, parent: Self::Inode, name: &CStr) -> Result<Entry, io::Error> {
@@ -145,7 +146,7 @@ impl FileSystem for FakeFileSystemOne {
     }
 
     fn destroy(&self) {
-        self.fuse_session_end.store(true, Ordering::SeqCst);
+        nix::unistd::write(self.exit_fd, &[1]);
     }
 
     fn getattr(&self, ctx: &Context, inode: Self::Inode, handle: Option<Self::Handle>) -> io::Result<(libc::stat, Duration)> {
@@ -219,7 +220,7 @@ impl FileSystem for FakeFileSystemOne {
     }
 }
 
-impl BackendFileSystem<AsyncDriver, ()> for FakeFileSystemOne {
+impl BackendFileSystem<AsyncDriver, ()> for HelloFileSystem {
     fn mount(&self) -> Result<(Entry, u64), io::Error> {
         Ok((
             Entry {
@@ -239,7 +240,6 @@ impl BackendFileSystem<AsyncDriver, ()> for FakeFileSystemOne {
     }
 }
 
-#[cfg(feature = "macfuse")]
 fn main() {
     SimpleLogger::new()
         .with_level(LevelFilter::Trace)
@@ -251,9 +251,10 @@ fn main() {
     let mut options = VfsOptions::default();
     options.in_opts = FsOptions::EXPORT_SUPPORT;
     let vfs = Vfs::<AsyncDriver>::new(options);
-    let fuse_session_end: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    let fs = FakeFileSystemOne {
-        fuse_session_end: fuse_session_end.clone(),
+
+    let ( rx, sx ) = nix::unistd::pipe().unwrap();
+    let fs = HelloFileSystem {
+        exit_fd: sx,
     };
     vfs.mount(Box::new(fs), "/");
 
@@ -266,7 +267,7 @@ fn main() {
 
     let server = Server::<Vfs<AsyncDriver>, AsyncDriver>::new(vfs);
     let server = Arc::new(server);
-    let mut channel = session.new_channel(fuse_session_end.clone()).unwrap();
+    let mut channel = session.new_channel(rx).unwrap();
     loop {
         match channel.get_request() {
             Ok(request) => {
@@ -288,39 +289,4 @@ fn main() {
             }
         }
     }
-
-    //
-    // let mut handlers = Vec::new();
-    //
-    // for index in 0..5 {
-    //     let mut channel = session.new_channel().unwrap();
-    //     let server = server.clone();
-    //     let handler = std::thread::spawn(move || {
-    //         loop {
-    //             match channel.get_request() {
-    //                 Ok(request) => {
-    //                     match request {
-    //                         Some((reader, writer)) => {
-    //                             println!("get request!!! {:?}", index);
-    //                             server.handle_message(reader, writer, None, None);
-    //                         },
-    //                         None => {
-    //                             println!("get no request {:?}", index);
-    //                             break;
-    //
-    //                         },
-    //                     }
-    //                 },
-    //                 Err(e) => {
-    //                     println!("get request error: {:?}", e);
-    //                     break;
-    //                 }
-    //             }
-    //         }
-    //     });
-    //     handlers.push(handler);
-    // }
-    // for handler in handlers {
-    //     handler.join();
-    // }
 }
