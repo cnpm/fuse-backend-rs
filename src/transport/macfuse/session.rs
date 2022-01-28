@@ -10,6 +10,7 @@
 
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -173,16 +174,6 @@ impl FuseChannel {
         })
     }
 
-    fn wait_exit(&self) -> bool {
-        let pollfd = PollFd::new(self.pipe_fd, PollFlags::POLLRDNORM | PollFlags::POLLRDBAND);
-        let mut pollfds = vec![pollfd];
-        let fd_read = poll(&mut pollfds, 0);
-        match fd_read {
-            Ok(fd_read) => fd_read != 0,
-            Err(_) => true,
-        }
-    }
-
     /// Get next available FUSE request from the underlying fuse device file.
     ///
     /// Returns:
@@ -192,10 +183,6 @@ impl FuseChannel {
     pub fn get_request(&mut self) -> Result<Option<(Reader, Writer)>> {
         let fd = self.file.as_raw_fd();
         loop {
-            if self.wait_exit() {
-                return Ok(None);
-            }
-
             match read(fd, &mut self.buf) {
                 Ok(len) => {
                     // ###############################################

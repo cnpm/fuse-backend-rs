@@ -93,7 +93,17 @@ impl FileSystem for HelloFileSystem {
         Ok(())
     }
 
-    fn read(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, w: &mut dyn ZeroCopyWriter<S=()>, size: u32, offset: u64, lock_owner: Option<u64>, flags: u32) -> Result<usize> {
+    fn read(
+        &self,
+        ctx: &Context,
+        inode: Self::Inode,
+        handle: Self::Handle,
+        w: &mut dyn ZeroCopyWriter,
+        size: u32,
+        offset: u64,
+        lock_owner: Option<u64>,
+        flags: u32,
+    ) -> Result<usize> {
         let offset = offset as usize;
         let content = "hello, fuse".as_bytes();
         let mut buf = Vec::<u8>::with_capacity(size as usize);
@@ -179,7 +189,7 @@ impl FileSystem for HelloFileSystem {
     }
 }
 
-impl BackendFileSystem<AsyncDriver, ()> for HelloFileSystem {
+impl BackendFileSystem for HelloFileSystem {
     fn mount(&self) -> Result<(Entry, u64)> {
         Ok((
             Entry {

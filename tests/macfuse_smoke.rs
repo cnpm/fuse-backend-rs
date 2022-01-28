@@ -31,7 +31,7 @@ mod macfuse_tests {
         println!("files: {}", files);
 
         let content = exec(format!("cat {}/hello;", dest).as_str()).unwrap();
-        if content.eq("hello, fuse") {
+        if !content.eq("hello, fuse") {
             error!("content {}:\n is not right\n", content);
             return false;
         }

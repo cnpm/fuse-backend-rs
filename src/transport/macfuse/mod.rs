@@ -20,6 +20,7 @@ use crate::BitmapSlice;
 mod session;
 mod macfuse;
 pub use session::*;
+use crate::transport::FileVolatileSlice;
 
 /// Error codes for Virtio queue related operations.
 #[derive(Debug)]
@@ -213,7 +214,7 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
 
     /// Writes data to the writer from a file descriptor.
     /// Returns the number of bytes written to the writer.
-    pub fn write_from<F: FileReadWriteVolatile<S>>(
+    pub fn write_from<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         count: usize,
@@ -223,10 +224,9 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
         let cnt = src.read_vectored_volatile(
             // Safe because we have made sure buf has at least count capacity above
             unsafe {
-                &[VolatileSlice::with_bitmap(
+                &[FileVolatileSlice::new(
                     self.buf.as_mut_ptr().add(self.buf.len()),
                     count,
-                    self.bitmapslice.clone(),
                 )]
             },
         )?;
@@ -241,7 +241,7 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
 
     /// Writes data to the writer from a File at offset `off`.
     /// Returns the number of bytes written to the writer.
-    pub fn write_from_at<F: FileReadWriteVolatile<S>>(
+    pub fn write_from_at<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         count: usize,
@@ -252,10 +252,9 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
         let cnt = src.read_vectored_at_volatile(
             // Safe because we have made sure buf has at least count capacity above
             unsafe {
-                &[VolatileSlice::with_bitmap(
+                &[FileVolatileSlice::new(
                     self.buf.as_mut_ptr().add(self.buf.len()),
                     count,
-                    self.bitmapslice.clone(),
                 )]
             },
             off,
@@ -270,7 +269,7 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
     }
 
     /// Writes all data to the writer from a file descriptor.
-    pub fn write_all_from<F: FileReadWriteVolatile<S>>(
+    pub fn write_all_from<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         mut count: usize,
