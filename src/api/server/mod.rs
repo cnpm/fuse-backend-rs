@@ -45,16 +45,15 @@ const DIRENT_PADDING: [u8; 8] = [0; 8];
 pub const MAX_REQ_PAGES: u16 = 256; // 1MB
 
 /// Fuse Server to handle requests from the Fuse client and vhost user master.
-pub struct Server<F: FileSystem<S> + Sync, D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()> {
+pub struct Server<F: FileSystem + Sync, D: AsyncDrive = AsyncDriver> {
     fs: F,
     vers: ArcSwap<ServerVersion>,
     phantom: PhantomData<D>,
-    phantom2: PhantomData<S>,
 }
 
-impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
+impl<F: FileSystem + Sync, D: AsyncDrive> Server<F, D> {
     /// Create a Server instance from a filesystem driver object.
-    pub fn new(fs: F) -> Server<F, D, S> {
+    pub fn new(fs: F) -> Server<F, D> {
         Server {
             fs,
             vers: ArcSwap::new(Arc::new(ServerVersion {
@@ -62,7 +61,6 @@ impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
                 minor: KERNEL_MINOR_VERSION,
             })),
             phantom: PhantomData,
-            phantom2: PhantomData,
         }
     }
 }
@@ -70,11 +68,9 @@ impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
 struct ZcReader<'a, S: BitmapSlice = ()>(Reader<'a, S>);
 
 impl<'a, S: BitmapSlice> ZeroCopyReader for ZcReader<'a, S> {
-    type S = S;
-
     fn read_to(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize> {
@@ -91,11 +87,9 @@ impl<'a, S: BitmapSlice> io::Read for ZcReader<'a, S> {
 struct ZcWriter<'a, S: BitmapSlice = ()>(Writer<'a, S>);
 
 impl<'a, S: BitmapSlice> ZeroCopyWriter for ZcWriter<'a, S> {
-    type S = S;
-
     fn write_from(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize> {
@@ -165,6 +159,7 @@ pub trait MetricsHook {
 }
 
 struct SrvContext<'a, F, D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()> {
+    #[allow(dead_code)]
     drive: Option<D>,
     in_header: InHeader,
     context: Context,
@@ -174,7 +169,7 @@ struct SrvContext<'a, F, D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()> {
     phantom2: PhantomData<S>,
 }
 
-impl<'a, F: FileSystem<S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
+impl<'a, F: FileSystem, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
     fn new(in_header: InHeader, r: Reader<'a, S>, w: Writer<'a, S>) -> Self {
         let context = Context::from(&in_header);
 

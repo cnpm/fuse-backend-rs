@@ -28,7 +28,7 @@ use crate::bytes_to_cstr;
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::transport::FsCacheReqHandler;
 
-impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
+impl<D: AsyncDrive> PassthroughFs<D> {
     fn open_inode(&self, inode: Inode, mut flags: i32) -> io::Result<File> {
         // When writeback caching is enabled, the kernel may send read requests even if the
         // userspace program opened the file write-only. So we need to ensure that we have opened
@@ -52,7 +52,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         let data = self.inode_map.get(inode)?;
         let file = data.get_file(&self.mount_fds)?;
 
-        Self::open_proc_file(&self.proc, file.as_raw_fd(), flags)
+        Self::open_proc_file(&self.proc_self_fd, file.as_raw_fd(), flags, data.mode)
     }
 
     fn do_readdir(
@@ -294,7 +294,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
     }
 }
 
-impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughFs<D, S> {
+impl<D: AsyncDrive> FileSystem for PassthroughFs<D> {
     type Inode = Inode;
     type Handle = Handle;
 
@@ -364,6 +364,10 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
     }
 
     fn lookup(&self, _ctx: &Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
+        // Don't use is_safe_path_component(), allow "." and ".." for NFS export support
+        if name.to_bytes_with_nul().contains(&SLASH_ASCII) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
         self.do_lookup(parent, name)
     }
 
@@ -413,6 +417,8 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         mode: u32,
         umask: u32,
     ) -> io::Result<Entry> {
+        self.validate_path_component(name)?;
+
         let data = self.inode_map.get(parent)?;
 
         let res = {
@@ -430,6 +436,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
     }
 
     fn rmdir(&self, _ctx: &Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        self.validate_path_component(name)?;
         self.do_unlink(parent, name, libc::AT_REMOVEDIR)
     }
 
@@ -540,6 +547,8 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         name: &CStr,
         args: CreateIn,
     ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
+        self.validate_path_component(name)?;
+
         let dir = self.inode_map.get(parent)?;
         let dir_file = dir.get_file(&self.mount_fds)?;
 
@@ -554,11 +563,12 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
             )?
         };
 
-        // Safe because this doesn't modify any memory and we check the return value. We don't
-        // really check `flags` because if the kernel can't handle poorly specified flags then we
-        // have much bigger problems.
+        let entry = self.do_lookup(parent, name)?;
         let file = match new_file {
+            // File didn't exist, now created by create_file_excl()
             Some(f) => f,
+            // File exists, and args.flags doesn't contain O_EXCL. Now let's open it with
+            // open_inode().
             None => {
                 // Cap restored when _killpriv is dropped
                 let _killpriv = if self.killpriv_v2.load(Ordering::Relaxed)
@@ -570,17 +580,9 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
                 };
 
                 let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
-
-                Self::open_file(
-                    dir_file.as_raw_fd(),
-                    name,
-                    args.flags as i32 | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    args.mode & !(args.umask & 0o777),
-                )?
+                self.open_inode(entry.inode, args.flags as i32)?
             }
         };
-
-        let entry = self.do_lookup(parent, name)?;
 
         let ret_handle = if !self.no_open.load(Ordering::Relaxed) {
             let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -603,6 +605,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
     }
 
     fn unlink(&self, _ctx: &Context, parent: Inode, name: &CStr) -> io::Result<()> {
+        self.validate_path_component(name)?;
         self.do_unlink(parent, name, 0)
     }
 
@@ -649,7 +652,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         _ctx: &Context,
         inode: Inode,
         handle: Handle,
-        w: &mut dyn ZeroCopyWriter<S = S>,
+        w: &mut dyn ZeroCopyWriter,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -671,7 +674,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         _ctx: &Context,
         inode: Inode,
         handle: Handle,
-        r: &mut dyn ZeroCopyReader<S = S>,
+        r: &mut dyn ZeroCopyReader,
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -724,7 +727,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
 
         let file = inode_data.get_file(&self.mount_fds)?;
         let data = if self.no_open.load(Ordering::Relaxed) {
-            let pathname = CString::new(format!("self/fd/{}", file.as_raw_fd()))
+            let pathname = CString::new(format!("{}", file.as_raw_fd()))
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             Data::ProcPath(pathname)
         } else {
@@ -734,7 +737,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
                 let fd = hd.get_handle_raw_fd();
                 Data::Handle(hd, fd)
             } else {
-                let pathname = CString::new(format!("self/fd/{}", file.as_raw_fd()))
+                let pathname = CString::new(format!("{}", file.as_raw_fd()))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 Data::ProcPath(pathname)
             }
@@ -746,7 +749,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
                 match data {
                     Data::Handle(_, fd) => libc::fchmod(fd, attr.st_mode),
                     Data::ProcPath(ref p) => {
-                        libc::fchmodat(self.proc.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
+                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
                     }
                 }
             };
@@ -841,7 +844,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
             let res = match data {
                 Data::Handle(_, fd) => unsafe { libc::futimens(fd, tvs.as_ptr()) },
                 Data::ProcPath(ref p) => unsafe {
-                    libc::utimensat(self.proc.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
+                    libc::utimensat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
                 },
             };
             if res < 0 {
@@ -861,6 +864,9 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         newname: &CStr,
         flags: u32,
     ) -> io::Result<()> {
+        self.validate_path_component(oldname)?;
+        self.validate_path_component(newname)?;
+
         let old_inode = self.inode_map.get(olddir)?;
         let new_inode = self.inode_map.get(newdir)?;
         let old_file = old_inode.get_file(&self.mount_fds)?;
@@ -895,6 +901,8 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         rdev: u32,
         umask: u32,
     ) -> io::Result<Entry> {
+        self.validate_path_component(name)?;
+
         let data = self.inode_map.get(parent)?;
         let file = data.get_file(&self.mount_fds)?;
 
@@ -925,6 +933,8 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         newparent: Inode,
         newname: &CStr,
     ) -> io::Result<Entry> {
+        self.validate_path_component(newname)?;
+
         let data = self.inode_map.get(inode)?;
         let new_inode = self.inode_map.get(newparent)?;
         let file = data.get_file(&self.mount_fds)?;
@@ -957,6 +967,8 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> FileSystem<S> for PassthroughF
         parent: Inode,
         name: &CStr,
     ) -> io::Result<Entry> {
+        self.validate_path_component(name)?;
+
         let data = self.inode_map.get(parent)?;
 
         let res = {

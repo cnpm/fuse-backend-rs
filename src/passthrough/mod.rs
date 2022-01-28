@@ -13,13 +13,15 @@
 
 use std::any::Any;
 use std::collections::{btree_map, BTreeMap};
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs::File;
 use std::io;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
@@ -29,7 +31,10 @@ use vm_memory::ByteValued;
 
 use crate::abi::linux_abi as fuse;
 use crate::api::filesystem::Entry;
-use crate::api::{BackendFileSystem, VFS_MAX_INO};
+use crate::api::{
+    validate_path_component, BackendFileSystem, CURRENT_DIR_CSTR, EMPTY_CSTR, PARENT_DIR_CSTR,
+    PROC_SELF_FD_CSTR, SLASH_ASCII, VFS_MAX_INO,
+};
 use crate::BitmapSlice;
 
 #[cfg(feature = "async-io")]
@@ -42,11 +47,6 @@ use file_handle::{FileHandle, MountFds};
 use multikey::MultikeyBTreeMap;
 
 use crate::async_util::{AsyncDrive, AsyncDriver};
-
-const CURRENT_DIR_CSTR: &[u8] = b".\0";
-const PARENT_DIR_CSTR: &[u8] = b"..\0";
-const EMPTY_CSTR: &[u8] = b"\0";
-const PROC_CSTR: &[u8] = b"/proc\0";
 
 type Inode = u64;
 type Handle = u64;
@@ -127,15 +127,25 @@ struct InodeData {
     #[allow(dead_code)]
     altkey: InodeAltKey,
     refcount: AtomicU64,
+    // File type and mode, not used for now
+    mode: u32,
+}
+
+// Returns true if it's safe to open this inode without O_PATH.
+fn is_safe_inode(mode: u32) -> bool {
+    // Only regular files and directories are considered safe to be opened from the file
+    // server without O_PATH.
+    matches!(mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFDIR)
 }
 
 impl<'a> InodeData {
-    fn new(inode: Inode, f: FileOrHandle, refcount: u64, altkey: InodeAltKey) -> Self {
+    fn new(inode: Inode, f: FileOrHandle, refcount: u64, altkey: InodeAltKey, mode: u32) -> Self {
         InodeData {
             inode,
             file_or_handle: f,
             altkey,
             refcount: AtomicU64::new(refcount),
+            mode,
         }
     }
 
@@ -507,11 +517,11 @@ pub struct PassthroughFs<D: AsyncDrive = AsyncDriver, S: BitmapSlice + Send + Sy
     // Maps mount IDs to an open FD on the respective ID for the purpose of open_by_handle_at().
     mount_fds: MountFds,
 
-    // File descriptor pointing to the `/proc` directory. This is used to convert an fd from
+    // File descriptor pointing to the `/proc/self/fd` directory. This is used to convert an fd from
     // `inodes` into one that can go into `handles`. This is accomplished by reading the
-    // `self/fd/{}` symlink. We keep an open fd here in case the file system tree that we are meant
-    // to be serving doesn't have access to `/proc`.
-    proc: File,
+    // `/proc/self/fd/{}` symlink. We keep an open fd here in case the file system tree that we are meant
+    // to be serving doesn't have access to `/proc/self/fd`.
+    proc_self_fd: File,
 
     // Whether writeback caching is enabled for this directory. This will only be true when
     // `cfg.writeback` is true and `init` was called with `FsOptions::WRITEBACK_CACHE`.
@@ -543,10 +553,10 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
     /// Create a Passthrough file system instance.
     pub fn new(cfg: Config) -> io::Result<PassthroughFs<D, S>> {
         // Safe because this is a constant value and a valid C string.
-        let proc_cstr = unsafe { CStr::from_bytes_with_nul_unchecked(PROC_CSTR) };
-        let proc = Self::open_file(
+        let proc_self_fd_cstr = unsafe { CStr::from_bytes_with_nul_unchecked(PROC_SELF_FD_CSTR) };
+        let proc_self_fd = Self::open_file(
             libc::AT_FDCWD,
-            proc_cstr,
+            proc_self_fd_cstr,
             libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0,
         )?;
@@ -559,7 +569,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
             next_handle: AtomicU64::new(1),
             mount_fds: MountFds::new(),
 
-            proc,
+            proc_self_fd,
 
             writeback: AtomicBool::new(false),
             no_open: AtomicBool::new(false),
@@ -578,15 +588,15 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
     pub fn import(&self) -> io::Result<()> {
         let root = CString::new(self.cfg.root_dir.as_str()).expect("CString::new failed");
 
-        let (file_or_handle, _st, ids_altkey, handle_altkey) = Self::open_file_or_handle(
+        let (file_or_handle, st, ids_altkey, handle_altkey) = Self::open_file_or_handle(
             self.cfg.inode_file_handles,
             libc::AT_FDCWD,
             &root,
             &self.mount_fds,
-            |fd, flags| {
-                let pathname = CString::new(format!("self/fd/{}", fd))
+            |fd, flags, _mode| {
+                let pathname = CString::new(format!("{}", fd))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                Self::open_file(self.proc.as_raw_fd(), &pathname, flags, 0)
+                Self::open_file(self.proc_self_fd.as_raw_fd(), &pathname, flags, 0)
             },
         )
         .map_err(|e| {
@@ -602,7 +612,13 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         // Not sure why the root inode gets a refcount of 2 but that's what libfuse does.
         self.inode_map.insert(
             fuse::ROOT_ID,
-            InodeData::new(fuse::ROOT_ID, file_or_handle, 2, ids_altkey),
+            InodeData::new(
+                fuse::ROOT_ID,
+                file_or_handle,
+                2,
+                ids_altkey,
+                st.get_stat().st_mode,
+            ),
             ids_altkey,
             handle_altkey,
         );
@@ -612,7 +628,54 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
 
     /// Get the list of file descriptors which should be reserved across live upgrade.
     pub fn keep_fds(&self) -> Vec<RawFd> {
-        vec![self.proc.as_raw_fd()]
+        vec![self.proc_self_fd.as_raw_fd()]
+    }
+
+    fn readlinkat(dfd: i32, pathname: &CStr) -> io::Result<PathBuf> {
+        let mut buf = Vec::with_capacity(libc::PATH_MAX as usize);
+
+        // Safe because the kernel will only write data to buf and we check the return value
+        let buf_read = unsafe {
+            libc::readlinkat(
+                dfd,
+                pathname.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.capacity(),
+            )
+        };
+        if buf_read < 0 {
+            error!("fuse: readlinkat error");
+            return Err(io::Error::last_os_error());
+        }
+
+        // Safe because we know buf len
+        unsafe {
+            buf.set_len(buf_read as usize);
+        }
+
+        if (buf_read as usize) < buf.capacity() {
+            buf.shrink_to_fit();
+
+            return Ok(PathBuf::from(OsString::from_vec(buf)));
+        }
+
+        error!(
+            "fuse: readlinkat return value {} is greater than libc::PATH_MAX({})",
+            buf_read,
+            libc::PATH_MAX
+        );
+        Err(io::Error::from_raw_os_error(libc::EOVERFLOW))
+    }
+
+    /// Get the file pathname corresponding to the Inode
+    /// This function is used by Nydus blobfs
+    pub fn readlinkat_proc_file(&self, inode: Inode) -> io::Result<PathBuf> {
+        let data = self.inode_map.get(inode)?;
+        let file = data.get_file(&self.mount_fds)?;
+        let pathname = CString::new(format!("{}", file.as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        Self::readlinkat(self.proc_self_fd.as_raw_fd(), &pathname)
     }
 
     fn stat(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<libc::stat64> {
@@ -648,6 +711,9 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         flags: i32,
         mode: u32,
     ) -> io::Result<Option<File>> {
+        // Safe because this doesn't modify any memory and we check the return value. We don't
+        // really check `flags` because if the kernel can't handle poorly specified flags then we
+        // have much bigger problems.
         let fd = unsafe {
             libc::openat(
                 dfd,
@@ -657,12 +723,17 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
             )
         };
         if fd < 0 {
+            // Ignore the error if the file exists and O_EXCL is not present in `flags`.
             let err = io::Error::last_os_error();
             if err.kind() == io::ErrorKind::AlreadyExists {
+                if (flags & libc::O_EXCL) != 0 {
+                    return Err(err);
+                }
                 return Ok(None);
             }
             return Err(err);
         }
+        // Safe because we just opened this fd
         Ok(Some(unsafe { File::from_raw_fd(fd) }))
     }
 
@@ -681,8 +752,12 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn open_proc_file(proc: &File, fd: RawFd, flags: i32) -> io::Result<File> {
-        let pathname = CString::new(format!("self/fd/{}", fd))
+    fn open_proc_file(proc: &File, fd: RawFd, flags: i32, mode: u32) -> io::Result<File> {
+        if !is_safe_inode(mode) {
+            return Err(ebadf());
+        }
+
+        let pathname = CString::new(format!("{}", fd))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // We don't really check `flags` because if the kernel can't handle poorly specified flags
@@ -705,7 +780,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         reopen_dir: F,
     ) -> io::Result<(FileOrHandle, InodeStat, InodeAltKey, Option<InodeAltKey>)>
     where
-        F: FnOnce(RawFd, libc::c_int) -> io::Result<File>,
+        F: FnOnce(RawFd, libc::c_int, u32) -> io::Result<File>,
     {
         let handle = if use_handle {
             FileHandle::from_name_at_with_mount_fds(dir_fd, name, mount_fds, reopen_dir)
@@ -759,6 +834,14 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
     }
 
     fn do_lookup(&self, parent: Inode, name: &CStr) -> io::Result<Entry> {
+        let name =
+            if parent == fuse::ROOT_ID && name.to_bytes_with_nul().starts_with(PARENT_DIR_CSTR) {
+                // Safe as this is a constant value and a valid C string.
+                &CStr::from_bytes_with_nul(CURRENT_DIR_CSTR).unwrap()
+            } else {
+                name
+            };
+
         let dir = self.inode_map.get(parent)?;
         let dir_file = dir.get_file(&self.mount_fds)?;
         let (file_or_handle, st, ids_altkey, handle_altkey) = Self::open_file_or_handle(
@@ -766,7 +849,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
             dir_file.as_raw_fd(),
             name,
             &self.mount_fds,
-            |fd, flags| Self::open_proc_file(&self.proc, fd, flags),
+            |fd, flags, mode| Self::open_proc_file(&self.proc_self_fd, fd, flags, mode),
         )?;
 
         // Whether to enable file DAX according to the value of dax_file_size
@@ -848,7 +931,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
                     InodeMap::insert_locked(
                         inodes.deref_mut(),
                         inode,
-                        InodeData::new(inode, file_or_handle, 1, ids_altkey),
+                        InodeData::new(inode, file_or_handle, 1, ids_altkey, st.get_stat().st_mode),
                         ids_altkey,
                         handle_altkey,
                     );
@@ -912,12 +995,20 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
     fn do_release(&self, inode: Inode, handle: Handle) -> io::Result<()> {
         self.handle_map.release(handle, inode)
     }
+
+    // Validate a path component, same as the one in vfs layer, but only do the validation if this
+    // passthroughfs is used without vfs layer, to avoid double validation.
+    fn validate_path_component(&self, name: &CStr) -> io::Result<()> {
+        // !self.cfg.do_import means we're under vfs, and vfs has already done the validation
+        if !self.cfg.do_import {
+            return Ok(());
+        }
+        validate_path_component(name)
+    }
 }
 
 #[cfg(not(feature = "async-io"))]
-impl<D: AsyncDrive, S: 'static + BitmapSlice + Send + Sync> BackendFileSystem<D, S>
-    for PassthroughFs<D, S>
-{
+impl<D: AsyncDrive> BackendFileSystem<D> for PassthroughFs<D> {
     fn mount(&self) -> io::Result<(Entry, u64)> {
         let entry = self.do_lookup(fuse::ROOT_ID, &CString::new(".").unwrap())?;
         Ok((entry, VFS_MAX_INO))
@@ -1025,13 +1116,38 @@ mod tests {
     use std::ops::Deref;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
+    fn prepare_passthroughfs() -> PassthroughFs {
+        let source = TempDir::new().expect("Cannot create temporary directory.");
+        let parent_path =
+            TempDir::new_in(source.as_path()).expect("Cannot create temporary directory.");
+        let _child_path =
+            TempFile::new_in(parent_path.as_path()).expect("Cannot create temporary file.");
+
+        let fs_cfg = Config {
+            writeback: true,
+            do_import: true,
+            no_open: true,
+            inode_file_handles: false,
+            root_dir: source
+                .as_path()
+                .to_str()
+                .expect("source path to string")
+                .to_string(),
+            ..Default::default()
+        };
+        let fs = PassthroughFs::<AsyncDriver, ()>::new(fs_cfg).unwrap();
+        fs.import().unwrap();
+
+        fs
+    }
+
     fn passthroughfs_no_open(cfg: bool) {
         let opts = VfsOptions {
             no_open: cfg,
             ..Default::default()
         };
 
-        let vfs = &Vfs::<AsyncDriver, ()>::new(opts);
+        let vfs = &Vfs::<AsyncDriver>::new(opts);
         // Assume that fuse kernel supports no_open.
         vfs.init(FsOptions::ZERO_MESSAGE_OPEN).unwrap();
 
@@ -1096,11 +1212,27 @@ mod tests {
         let ctx = Context::default();
 
         // read a few files to inode map.
-        let parent = CString::new(parent_path.as_path().to_str().expect("path to string")).unwrap();
+        let parent = CString::new(
+            parent_path
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .expect("path to string"),
+        )
+        .unwrap();
         let p_entry = fs.lookup(&ctx, ROOT_ID, &parent).unwrap();
         let p_inode = p_entry.inode;
 
-        let child = CString::new(child_path.as_path().to_str().expect("path to string")).unwrap();
+        let child = CString::new(
+            child_path
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .expect("path to string"),
+        )
+        .unwrap();
         let c_entry = fs.lookup(&ctx, p_inode, &child).unwrap();
 
         // Following test depends on host fs, it's not reliable.
@@ -1111,5 +1243,39 @@ mod tests {
         assert_eq!(duration, fs.cfg.attr_timeout);
 
         fs.destroy();
+    }
+
+    #[test]
+    fn test_lookup_escape_root() {
+        let fs = prepare_passthroughfs();
+        let ctx = Context::default();
+
+        let name = CString::new("..").unwrap();
+        let entry = fs.lookup(&ctx, ROOT_ID, &name).unwrap();
+        assert_eq!(entry.inode, ROOT_ID);
+    }
+
+    #[test]
+    fn test_is_safe_inode() {
+        let mode = libc::S_IFREG;
+        assert!(is_safe_inode(mode));
+
+        let mode = libc::S_IFDIR;
+        assert!(is_safe_inode(mode));
+
+        let mode = libc::S_IFBLK;
+        assert!(!is_safe_inode(mode));
+
+        let mode = libc::S_IFCHR;
+        assert!(!is_safe_inode(mode));
+
+        let mode = libc::S_IFIFO;
+        assert!(!is_safe_inode(mode));
+
+        let mode = libc::S_IFLNK;
+        assert!(!is_safe_inode(mode));
+
+        let mode = libc::S_IFSOCK;
+        assert!(!is_safe_inode(mode));
     }
 }

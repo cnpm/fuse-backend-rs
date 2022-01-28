@@ -42,13 +42,17 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, IoSlice, Write};
+use std::ops::Deref;
 use std::ptr::copy_nonoverlapping;
 
-use vm_memory::bitmap::{BitmapSlice, MS};
-use vm_memory::{ByteValued, GuestMemory, GuestMemoryError, VolatileMemoryError, VolatileSlice};
-use vm_virtio::{DescriptorChain, Error as QueueError};
+use virtio_queue::{DescriptorChain, Error as QueueError};
+use vm_memory::bitmap::BitmapSlice;
+use vm_memory::{
+    Address, ByteValued, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
+    VolatileMemory, VolatileMemoryError, VolatileSlice,
+};
 
-use super::{FileReadWriteVolatile, IoBuffers, Reader};
+use super::{FileReadWriteVolatile, FileVolatileSlice, IoBuffers, Reader};
 
 mod fs_cache_req_handler;
 pub use self::fs_cache_req_handler::FsCacheReqHandler;
@@ -99,19 +103,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl std::error::Error for Error {}
 
-impl<'a, M: GuestMemory> Reader<'a, M> {
+impl<S: BitmapSlice> IoBuffers<'_, S> {
+    /// Consumes for write.
+    fn consume_for_write<F>(&mut self, count: usize, f: F) -> io::Result<usize>
+    where
+        F: FnOnce(&[FileVolatileSlice]) -> io::Result<usize>,
+    {
+        self.consume(true, count, f)
+    }
+}
+
+impl<'a> Reader<'a> {
     /// Construct a new Reader wrapper over `desc_chain`.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(mem: &'a M, desc_chain: DescriptorChain<'a, M>) -> Result<Reader<'a, MS<'a, M>>> {
+    pub fn new<M>(mem: &'a GuestMemoryMmap, desc_chain: DescriptorChain<M>) -> Result<Reader<'a>>
+    where
+        M: Deref,
+        M::Target: GuestMemory + Sized,
+    {
         let mut total_len: usize = 0;
-        let chain = if desc_chain.is_indirect() {
-            desc_chain
-                .new_from_indirect()
-                .map_err(Error::ConvertIndirectDescriptor)?
-        } else {
-            desc_chain
-        };
-        let buffers = chain
+        let buffers = desc_chain
             .readable()
             .map(|desc| {
                 // Verify that summing the descriptor sizes does not overflow.
@@ -121,10 +131,19 @@ impl<'a, M: GuestMemory> Reader<'a, M> {
                     .checked_add(desc.len() as usize)
                     .ok_or(Error::DescriptorChainOverflow)?;
 
-                mem.get_slice(desc.addr(), desc.len() as usize)
-                    .map_err(Error::GuestMemoryError)
+                let region = mem
+                    .find_region(desc.addr())
+                    .ok_or(Error::FindMemoryRegion)?;
+                let offset = desc
+                    .addr()
+                    .checked_sub(region.start_addr().raw_value())
+                    .unwrap();
+                region
+                    .deref()
+                    .get_slice(offset.raw_value() as usize, desc.len() as usize)
+                    .map_err(Error::VolatileMemoryError)
             })
-            .collect::<Result<VecDeque<VolatileSlice<'a, MS<M>>>>>()?;
+            .collect::<Result<VecDeque<VolatileSlice<'a>>>>()?;
 
         Ok(Reader {
             buffers: IoBuffers {
@@ -147,19 +166,15 @@ pub struct Writer<'a, S = ()> {
     buffers: IoBuffers<'a, S>,
 }
 
-impl<'a, M: GuestMemory> Writer<'a, M> {
+impl<'a> Writer<'a> {
     /// Construct a new Writer wrapper over `desc_chain`.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(mem: &'a M, desc_chain: DescriptorChain<'a, M>) -> Result<Writer<'a, MS<'a, M>>> {
+    pub fn new<M>(mem: &'a GuestMemoryMmap, desc_chain: DescriptorChain<M>) -> Result<Writer<'a>>
+    where
+        M: Deref,
+        M::Target: GuestMemory + Sized,
+    {
         let mut total_len: usize = 0;
-        let chain = if desc_chain.is_indirect() {
-            desc_chain
-                .new_from_indirect()
-                .map_err(Error::ConvertIndirectDescriptor)?
-        } else {
-            desc_chain
-        };
-        let buffers = chain
+        let buffers = desc_chain
             .writable()
             .map(|desc| {
                 // Verify that summing the descriptor sizes does not overflow.
@@ -169,10 +184,19 @@ impl<'a, M: GuestMemory> Writer<'a, M> {
                     .checked_add(desc.len() as usize)
                     .ok_or(Error::DescriptorChainOverflow)?;
 
-                mem.get_slice(desc.addr(), desc.len() as usize)
-                    .map_err(Error::GuestMemoryError)
+                let region = mem
+                    .find_region(desc.addr())
+                    .ok_or(Error::FindMemoryRegion)?;
+                let offset = desc
+                    .addr()
+                    .checked_sub(region.start_addr().raw_value())
+                    .unwrap();
+                region
+                    .deref()
+                    .get_slice(offset.raw_value() as usize, desc.len() as usize)
+                    .map_err(Error::VolatileMemoryError)
             })
-            .collect::<Result<VecDeque<VolatileSlice<'a, MS<M>>>>>()?;
+            .collect::<Result<VecDeque<VolatileSlice<'a>>>>()?;
 
         Ok(Writer {
             buffers: IoBuffers {
@@ -191,19 +215,19 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
 
     /// Writes data to the descriptor chain buffer from a file descriptor.
     /// Returns the number of bytes written to the descriptor chain buffer.
-    pub fn write_from<F: FileReadWriteVolatile<S>>(
+    pub fn write_from<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         count: usize,
     ) -> io::Result<usize> {
         self.check_available_space(count)?;
         self.buffers
-            .consume(count, |bufs| src.read_vectored_volatile(bufs))
+            .consume_for_write(count, |bufs| src.read_vectored_volatile(bufs))
     }
 
     /// Writes data to the descriptor chain buffer from a File at offset `off`.
     /// Returns the number of bytes written to the descriptor chain buffer.
-    pub fn write_from_at<F: FileReadWriteVolatile<S>>(
+    pub fn write_from_at<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         count: usize,
@@ -211,11 +235,11 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
     ) -> io::Result<usize> {
         self.check_available_space(count)?;
         self.buffers
-            .consume(count, |bufs| src.read_vectored_at_volatile(bufs, off))
+            .consume_for_write(count, |bufs| src.read_vectored_at_volatile(bufs, off))
     }
 
     /// Writes all data to the descriptor chain buffer from a file descriptor.
-    pub fn write_all_from<F: FileReadWriteVolatile<S>>(
+    pub fn write_all_from<F: FileReadWriteVolatile>(
         &mut self,
         mut src: F,
         mut count: usize,
@@ -285,7 +309,7 @@ impl<'a, S: BitmapSlice> io::Write for Writer<'a, S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.check_available_space(buf.len())?;
 
-        self.buffers.consume(buf.len(), |bufs| {
+        self.buffers.consume_for_write(buf.len(), |bufs| {
             let mut rem = buf;
             let mut total = 0;
             for buf in bufs {
@@ -295,7 +319,6 @@ impl<'a, S: BitmapSlice> io::Write for Writer<'a, S> {
                 unsafe {
                     copy_nonoverlapping(rem.as_ptr(), buf.as_ptr(), copy_len);
                 }
-                buf.bitmap().mark_dirty(0, copy_len);
                 rem = &rem[copy_len..];
                 total += copy_len;
             }
@@ -437,7 +460,9 @@ mod async_io {
     }
 }
 
-#[cfg(test)]
+/// Disabled since vm-virtio doesn't export any DescriptorChain constructors.
+/// Should re-enable once it does.
+#[cfg(testff)]
 mod tests {
     use super::*;
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -504,7 +529,7 @@ mod tests {
             );
         }
 
-        DescriptorChain::checked_new(memory, descriptor_array_addr, 0x100, 0)
+        DescriptorChain::<&GuestMemoryMmap>::new(memory, descriptor_array_addr, 0x100, 0)
             .ok_or(Error::InvalidChain)
     }
 

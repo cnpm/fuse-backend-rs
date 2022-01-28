@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::io;
 use std::io::{Error, ErrorKind, Result};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -31,11 +32,21 @@ use super::pseudo_fs::PseudoFs;
 use crate::abi::linux_abi::*;
 use crate::api::filesystem::*;
 use crate::async_util::{AsyncDrive, AsyncDriver};
-use crate::BitmapSlice;
 
 #[cfg(feature = "async-io")]
 mod async_io;
 mod sync_io;
+
+/// Current directory
+pub const CURRENT_DIR_CSTR: &[u8] = b".\0";
+/// Parent directory
+pub const PARENT_DIR_CSTR: &[u8] = b"..\0";
+/// Emptry CSTR
+pub const EMPTY_CSTR: &[u8] = b"\0";
+/// Proc fd directory
+pub const PROC_SELF_FD_CSTR: &[u8] = b"/proc/self/fd\0";
+/// ASCII for slash('/')
+pub const SLASH_ASCII: u8 = 47;
 
 /// Maximum inode number supported by the VFS for backend file system
 pub const VFS_MAX_INO: u64 = 0xff_ffff_ffff_ffff;
@@ -46,9 +57,9 @@ pub const VFS_MAX_INO: u64 = 0xff_ffff_ffff_ffff;
 const VFS_INDEX_SHIFT: u8 = 56;
 const VFS_PSEUDO_FS_IDX: VfsIndex = 0;
 
-type ArcBackFs<DR, S> = Arc<BackFileSystem<DR, S>>;
-type ArcSuperBlock<D, S> = ArcSwap<Vec<Option<Arc<BackFileSystem<D, S>>>>>;
-type VfsEitherFs<'a, D, S> = Either<&'a PseudoFs<S>, ArcBackFs<D, S>>;
+type ArcBackFs<DR> = Arc<BackFileSystem<DR>>;
+type ArcSuperBlock<D> = ArcSwap<Vec<Option<Arc<BackFileSystem<D>>>>>;
+type VfsEitherFs<'a, D> = Either<&'a PseudoFs, ArcBackFs<D>>;
 
 type VfsHandle = u64;
 /// Vfs backend file system index
@@ -82,6 +93,33 @@ pub enum VfsError {
 
 /// Vfs result
 pub type VfsResult<T> = std::result::Result<T, VfsError>;
+
+#[inline]
+fn is_dot_or_dotdot(name: &CStr) -> bool {
+    let bytes = name.to_bytes_with_nul();
+    bytes.starts_with(CURRENT_DIR_CSTR) || bytes.starts_with(PARENT_DIR_CSTR)
+}
+
+// Is `path` a single path component that is not "." or ".."?
+fn is_safe_path_component(name: &CStr) -> bool {
+    let bytes = name.to_bytes_with_nul();
+
+    if bytes.contains(&SLASH_ASCII) {
+        return false;
+    }
+    !is_dot_or_dotdot(name)
+}
+
+/// Validate a path component. A well behaved FUSE client should never send dot, dotdot and path
+/// components containing slash ('/'). The only exception is that LOOKUP might contain dot and
+/// dotdot to support NFS export.
+#[inline]
+pub fn validate_path_component(name: &CStr) -> io::Result<()> {
+    match is_safe_path_component(name) {
+        true => Ok(()),
+        false => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+    }
+}
 
 impl VfsInode {
     fn new(fs_idx: VfsIndex, ino: u64) -> Self {
@@ -125,14 +163,11 @@ use Either::*;
 
 /// Type that implements BackendFileSystem and Sync and Send
 /// D refers to the type of asynchronous event driver
-pub type BackFileSystem<D, S> =
-    Box<dyn BackendFileSystem<D, S, Inode = u64, Handle = u64> + Sync + Send>;
+pub type BackFileSystem<D> = Box<dyn BackendFileSystem<D, Inode = u64, Handle = u64> + Sync + Send>;
 
 #[cfg(not(feature = "async-io"))]
 /// BackendFileSystem abstracts all backend file systems under vfs
-pub trait BackendFileSystem<D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()>:
-    FileSystem<S>
-{
+pub trait BackendFileSystem<D: AsyncDrive = AsyncDriver>: FileSystem {
     /// mount returns the backend file system root inode entry and
     /// the largest inode number it has.
     fn mount(&self) -> Result<(Entry, u64)> {
@@ -147,9 +182,7 @@ pub trait BackendFileSystem<D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()>:
 
 #[cfg(feature = "async-io")]
 /// BackendFileSystem abstracts all backend file systems under vfs
-pub trait BackendFileSystem<D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()>:
-    AsyncFileSystem<D, S>
-{
+pub trait BackendFileSystem<D: AsyncDrive = AsyncDriver>: AsyncFileSystem<D> {
     /// mount returns the backend file system root inode entry and
     /// the largest inode number it has.
     fn mount(&self) -> Result<(Entry, u64)> {
@@ -221,27 +254,26 @@ impl Default for VfsOptions {
 }
 
 /// A union fs that combines multiple backend file systems.
-pub struct Vfs<D: AsyncDrive = AsyncDriver, S: BitmapSlice = ()> {
+pub struct Vfs<D: AsyncDrive = AsyncDriver> {
     next_super: AtomicU8,
-    root: PseudoFs<S>,
+    root: PseudoFs,
     // mountpoints maps from pseudo fs inode to mounted fs mountpoint data
     mountpoints: ArcSwap<HashMap<u64, Arc<MountPointData>>>,
     // superblocks keeps track of all mounted file systems
-    superblocks: ArcSuperBlock<D, S>,
+    superblocks: ArcSuperBlock<D>,
     opts: ArcSwap<VfsOptions>,
     initialized: AtomicBool,
     lock: Mutex<()>,
     phantom: PhantomData<D>,
-    phantom2: PhantomData<S>,
 }
 
-impl<D: AsyncDrive, S: BitmapSlice> Default for Vfs<D, S> {
+impl<D: AsyncDrive> Default for Vfs<D> {
     fn default() -> Self {
         Self::new(VfsOptions::default())
     }
 }
 
-impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
+impl<D: AsyncDrive> Vfs<D> {
     /// Create a new vfs instance
     pub fn new(opts: VfsOptions) -> Self {
         Vfs {
@@ -253,7 +285,6 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
             lock: Mutex::new(()),
             initialized: AtomicBool::new(false),
             phantom: PhantomData,
-            phantom2: PhantomData,
         }
     }
 
@@ -265,7 +296,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
 
     fn insert_mount_locked(
         &self,
-        fs: BackFileSystem<D, S>,
+        fs: BackFileSystem<D>,
         mut entry: Entry,
         fs_idx: VfsIndex,
         path: &str,
@@ -276,6 +307,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
         let mut superblocks = self.superblocks.load().deref().deref().clone();
         let mut mountpoints = self.mountpoints.load().deref().deref().clone();
         let inode = self.root.mount(path)?;
+        let real_root_ino = entry.inode;
 
         entry.inode = self.convert_inode(fs_idx, entry.inode)?;
 
@@ -289,7 +321,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
 
         let mountpoint = Arc::new(MountPointData {
             fs_idx,
-            ino: ROOT_ID,
+            ino: real_root_ino,
             root_entry: entry,
             _path: path.to_string(),
         });
@@ -300,7 +332,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
     }
 
     /// Mount a backend file system to path
-    pub fn mount(&self, fs: BackFileSystem<D, S>, path: &str) -> VfsResult<VfsIndex> {
+    pub fn mount(&self, fs: BackFileSystem<D>, path: &str) -> VfsResult<VfsIndex> {
         let (entry, ino) = fs.mount().map_err(VfsError::Mount)?;
         if ino > VFS_MAX_INO {
             fs.destroy();
@@ -361,7 +393,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
     }
 
     /// Get the mounted backend file system alongside the path if there's one.
-    pub fn get_rootfs(&self, path: &str) -> VfsResult<Option<Arc<BackFileSystem<D, S>>>> {
+    pub fn get_rootfs(&self, path: &str) -> VfsResult<Option<Arc<BackFileSystem<D>>>> {
         // Serialize mount operations. Do not expect poisoned lock here.
         let _guard = self.lock.lock().unwrap();
         let inode = match self.root.path_walk(path).map_err(VfsError::PathWalk)? {
@@ -443,7 +475,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
         ))
     }
 
-    fn get_fs_by_idx(&self, fs_idx: VfsIndex) -> Result<Arc<BackFileSystem<D, S>>> {
+    fn get_fs_by_idx(&self, fs_idx: VfsIndex) -> Result<Arc<BackFileSystem<D>>> {
         let superblocks = self.superblocks.load();
 
         if let Some(fs) = &superblocks[fs_idx as usize] {
@@ -453,13 +485,13 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
         Err(Error::from_raw_os_error(libc::ENOENT))
     }
 
-    fn get_real_rootfs(&self, inode: VfsInode) -> Result<(VfsEitherFs<'_, D, S>, VfsInode)> {
+    fn get_real_rootfs(&self, inode: VfsInode) -> Result<(VfsEitherFs<'_, D>, VfsInode)> {
         if inode.is_pseudo_fs() {
             // ROOT_ID is special, we need to check if we have a mountpoint on the vfs root
             if inode.ino() == ROOT_ID {
                 if let Some(mnt) = self.mountpoints.load().get(&inode.ino()).map(Arc::clone) {
                     let fs = self.get_fs_by_idx(mnt.fs_idx)?;
-                    return Ok((Right(fs), VfsInode::new(mnt.fs_idx, ROOT_ID)));
+                    return Ok((Right(fs), VfsInode::new(mnt.fs_idx, mnt.ino)));
                 }
             }
             Ok((Left(&self.root), inode))
@@ -471,7 +503,7 @@ impl<D: AsyncDrive, S: BitmapSlice> Vfs<D, S> {
 
     fn lookup_pseudo(
         &self,
-        fs: &PseudoFs<S>,
+        fs: &PseudoFs,
         idata: VfsInode,
         ctx: &Context,
         name: &CStr,
@@ -510,14 +542,7 @@ mod tests {
         type Inode = u64;
         type Handle = u64;
         fn lookup(&self, _: &Context, _: Self::Inode, _: &CStr) -> Result<Entry> {
-            Ok(Entry {
-                inode: 0,
-                generation: 0,
-                attr: Attr::default().into(),
-                attr_flags: 0,
-                attr_timeout: Duration::new(0, 0),
-                entry_timeout: Duration::new(0, 0),
-            })
+            Ok(Entry::default())
         }
     }
 
@@ -528,13 +553,72 @@ mod tests {
         fn lookup(&self, _: &Context, _: Self::Inode, _: &CStr) -> Result<Entry> {
             Ok(Entry {
                 inode: 1,
-                generation: 0,
-                attr: Attr::default().into(),
-                attr_flags: 0,
-                attr_timeout: Duration::new(0, 0),
-                entry_timeout: Duration::new(0, 0),
+                ..Default::default()
             })
         }
+    }
+
+    #[test]
+    fn test_is_safe_path_component() {
+        let name = CStr::from_bytes_with_nul(b"normal\0").unwrap();
+        assert!(is_safe_path_component(name), "\"{:?}\"", name);
+
+        let name = CStr::from_bytes_with_nul(b".a\0").unwrap();
+        assert!(is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"a.a\0").unwrap();
+        assert!(is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"a.a\0").unwrap();
+        assert!(is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"/\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"/a\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b".\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"..\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"../.\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"a/b\0").unwrap();
+        assert!(!is_safe_path_component(name));
+
+        let name = CStr::from_bytes_with_nul(b"./../a\0").unwrap();
+        assert!(!is_safe_path_component(name));
+    }
+
+    #[test]
+    fn test_is_dot_or_dotdot() {
+        let name = CStr::from_bytes_with_nul(b"..\0").unwrap();
+        assert!(is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b".\0").unwrap();
+        assert!(is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"...\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"./.\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"a\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"aa\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"/a\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
+
+        let name = CStr::from_bytes_with_nul(b"a/\0").unwrap();
+        assert!(!is_dot_or_dotdot(name));
     }
 
     #[cfg(feature = "async-io")]
@@ -552,13 +636,7 @@ mod tests {
                 parent: <Self as FileSystem>::Inode,
                 name: &CStr,
             ) -> Result<Entry> {
-                Ok(Entry {
-                    inode: 0,
-                    generation: 0,
-                    attr: unsafe { std::mem::zeroed() },
-                    attr_timeout: Default::default(),
-                    entry_timeout: Default::default(),
-                })
+                Ok(Entry::default())
             }
 
             async fn async_getattr(
@@ -669,10 +747,7 @@ mod tests {
                 Ok((
                     Entry {
                         inode: 1,
-                        generation: 0,
-                        attr: Attr::default().into(),
-                        attr_timeout: Duration::new(0, 0),
-                        entry_timeout: Duration::new(0, 0),
+                        ..Default::default()
                     },
                     0,
                 ))
@@ -803,10 +878,7 @@ mod tests {
                 Ok((
                     Entry {
                         inode: 1,
-                        generation: 0,
-                        attr: Attr::default().into(),
-                        attr_timeout: Duration::new(0, 0),
-                        entry_timeout: Duration::new(0, 0),
+                        ..Default::default()
                     },
                     0,
                 ))
@@ -818,16 +890,12 @@ mod tests {
     }
 
     #[cfg(not(feature = "async-io"))]
-    impl BackendFileSystem<AsyncDriver, ()> for FakeFileSystemOne {
+    impl BackendFileSystem<AsyncDriver> for FakeFileSystemOne {
         fn mount(&self) -> Result<(Entry, u64)> {
             Ok((
                 Entry {
                     inode: 1,
-                    generation: 0,
-                    attr: Attr::default().into(),
-                    attr_flags: 0,
-                    attr_timeout: Duration::new(0, 0),
-                    entry_timeout: Duration::new(0, 0),
+                    ..Default::default()
                 },
                 0,
             ))
@@ -839,16 +907,12 @@ mod tests {
     }
 
     #[cfg(not(feature = "async-io"))]
-    impl BackendFileSystem<AsyncDriver, ()> for FakeFileSystemTwo {
+    impl BackendFileSystem<AsyncDriver> for FakeFileSystemTwo {
         fn mount(&self) -> Result<(Entry, u64)> {
             Ok((
                 Entry {
                     inode: 1,
-                    generation: 0,
-                    attr: Attr::default().into(),
-                    attr_flags: 0,
-                    attr_timeout: Duration::new(0, 0),
-                    entry_timeout: Duration::new(0, 0),
+                    ..Default::default()
                 },
                 0,
             ))

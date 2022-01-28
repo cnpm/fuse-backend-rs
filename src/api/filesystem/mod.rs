@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use crate::abi::linux_abi as fuse;
 use crate::transport::FileReadWriteVolatile;
-use crate::BitmapSlice;
 
 pub use fuse::FsOptions;
 pub use fuse::OpenOptions;
@@ -34,7 +33,6 @@ use libc::{
 };
 
 #[cfg(feature = "async-io")]
-#[doc(inline)]
 mod async_io;
 #[cfg(feature = "async-io")]
 pub use async_io::{AsyncFileSystem, AsyncZeroCopyReader, AsyncZeroCopyWriter};
@@ -156,9 +154,6 @@ pub enum ListxattrReply {
 /// A trait for directly copying data from the fuse transport into a `File` without first storing it
 /// in an intermediate buffer.
 pub trait ZeroCopyReader: io::Read {
-    /// Type for guest memory dirty tracking.
-    type S: BitmapSlice;
-
     /// Copies at most `count` bytes from `self` directly into `f` at offset `off` without storing
     /// it in any intermediate buffers. If the return value is `Ok(n)` then it must be guaranteed
     /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 3 possibilities:
@@ -174,7 +169,7 @@ pub trait ZeroCopyReader: io::Read {
     /// an error of the kind `io::ErrorKind::WriteZero`.
     fn read_to(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize>;
@@ -188,7 +183,7 @@ pub trait ZeroCopyReader: io::Read {
     /// will never be more than `count`.
     fn read_exact_to(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         mut count: usize,
         mut off: u64,
     ) -> io::Result<()> {
@@ -230,7 +225,7 @@ pub trait ZeroCopyReader: io::Read {
     /// If an error is returned then the number of bytes copied from `self` is unspecified.
     fn copy_to_end(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         mut off: u64,
     ) -> io::Result<usize> {
         let mut out = 0;
@@ -251,9 +246,6 @@ pub trait ZeroCopyReader: io::Read {
 /// A trait for directly copying data from a `File` into the fuse transport without first storing
 /// it in an intermediate buffer.
 pub trait ZeroCopyWriter: io::Write {
-    /// Type for guest memory dirty tracking.
-    type S: BitmapSlice;
-
     /// Copies at most `count` bytes from `f` at offset `off` directly into `self` without storing
     /// it in any intermediate buffers. If the return value is `Ok(n)` then it must be guaranteed
     /// that `0 <= n <= count`. If `n` is `0`, then it can indicate one of 3 possibilities:
@@ -269,7 +261,7 @@ pub trait ZeroCopyWriter: io::Write {
     /// error of the kind `io::ErrorKind::UnexpectedEof`.
     fn write_from(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize>;
@@ -283,7 +275,7 @@ pub trait ZeroCopyWriter: io::Write {
     /// well never be more than `count`.
     fn write_all_from(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         mut count: usize,
         mut off: u64,
     ) -> io::Result<()> {
@@ -328,7 +320,7 @@ pub trait ZeroCopyWriter: io::Write {
     /// If an error is returned then the number of bytes copied from `f` is unspecified.
     fn copy_to_end(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<Self::S>,
+        f: &mut dyn FileReadWriteVolatile,
         mut off: u64,
     ) -> io::Result<usize> {
         let mut out = 0;
@@ -347,7 +339,7 @@ pub trait ZeroCopyWriter: io::Write {
 }
 
 /// Additional context associated with requests.
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct Context {
     /// The user ID of the calling process.
     pub uid: libc::uid_t,
@@ -412,18 +404,6 @@ impl Context {
     }
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Context {
-            uid: 0,
-            gid: 0,
-            pid: 0,
-            #[cfg(feature = "async-io")]
-            drive: 0,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,9 +437,7 @@ mod tests {
             inode: 1,
             generation: 2,
             attr: attr.into(),
-            attr_flags: 0,
-            attr_timeout: Default::default(),
-            entry_timeout: Default::default(),
+            ..Default::default()
         };
         let fuse_entry: fuse::EntryOut = entry.into();
 

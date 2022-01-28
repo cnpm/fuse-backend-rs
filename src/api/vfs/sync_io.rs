@@ -14,7 +14,7 @@ use crate::async_util::AsyncDrive;
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::transport::FsCacheReqHandler;
 
-impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
+impl<D: AsyncDrive> FileSystem for Vfs<D> {
     type Inode = VfsInode;
     type Handle = VfsHandle;
 
@@ -70,6 +70,11 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
     }
 
     fn lookup(&self, ctx: &Context, parent: VfsInode, name: &CStr) -> Result<Entry> {
+        // Don't use is_safe_path_component(), allow "." and ".." for NFS export support
+        if name.to_bytes_with_nul().contains(&SLASH_ASCII) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => self.lookup_pseudo(fs, idata, ctx, name),
             (Right(fs), idata) => {
@@ -134,6 +139,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         parent: VfsInode,
         name: &CStr,
     ) -> Result<Entry> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => fs.symlink(ctx, linkname, idata.ino(), name),
             (Right(fs), idata) => fs.symlink(ctx, linkname, idata.ino(), name).map(|mut e| {
@@ -152,6 +159,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         rdev: u32,
         umask: u32,
     ) -> Result<Entry> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.mknod(ctx, idata.ino(), name, mode, rdev, umask),
             (Right(fs), idata) => {
@@ -172,6 +181,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         mode: u32,
         umask: u32,
     ) -> Result<Entry> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => fs.mkdir(ctx, idata.ino(), name, mode, umask),
             (Right(fs), idata) => fs.mkdir(ctx, idata.ino(), name, mode, umask).map(|mut e| {
@@ -182,6 +193,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
     }
 
     fn unlink(&self, ctx: &Context, parent: VfsInode, name: &CStr) -> Result<()> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => fs.unlink(ctx, idata.ino(), name),
             (Right(fs), idata) => fs.unlink(ctx, idata.ino(), name),
@@ -189,6 +202,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
     }
 
     fn rmdir(&self, ctx: &Context, parent: VfsInode, name: &CStr) -> Result<()> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => fs.rmdir(ctx, idata.ino(), name),
             (Right(fs), idata) => fs.rmdir(ctx, idata.ino(), name),
@@ -204,6 +219,9 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         newname: &CStr,
         flags: u32,
     ) -> Result<()> {
+        validate_path_component(oldname)?;
+        validate_path_component(newname)?;
+
         let (root, idata_old) = self.get_real_rootfs(olddir)?;
         let (_, idata_new) = self.get_real_rootfs(newdir)?;
 
@@ -238,6 +256,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         newparent: VfsInode,
         newname: &CStr,
     ) -> Result<Entry> {
+        validate_path_component(newname)?;
+
         let (root, idata_old) = self.get_real_rootfs(inode)?;
         let (_, idata_new) = self.get_real_rootfs(newparent)?;
 
@@ -282,6 +302,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         name: &CStr,
         args: CreateIn,
     ) -> Result<(Entry, Option<u64>, OpenOptions)> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(parent)? {
             (Left(fs), idata) => fs.create(ctx, idata.ino(), name, args),
             (Right(fs), idata) => {
@@ -299,7 +321,7 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         ctx: &Context,
         inode: VfsInode,
         handle: u64,
-        w: &mut dyn ZeroCopyWriter<S = S>,
+        w: &mut dyn ZeroCopyWriter,
         size: u32,
         offset: u64,
         lock_owner: Option<u64>,
@@ -320,7 +342,7 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         ctx: &Context,
         inode: VfsInode,
         handle: u64,
-        r: &mut dyn ZeroCopyReader<S = S>,
+        r: &mut dyn ZeroCopyReader,
         size: u32,
         offset: u64,
         lock_owner: Option<u64>,
@@ -432,6 +454,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         value: &[u8],
         flags: u32,
     ) -> Result<()> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.setxattr(ctx, idata.ino(), name, value, flags),
             (Right(fs), idata) => fs.setxattr(ctx, idata.ino(), name, value, flags),
@@ -445,6 +469,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
         name: &CStr,
         size: u32,
     ) -> Result<GetxattrReply> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.getxattr(ctx, idata.ino(), name, size),
             (Right(fs), idata) => fs.getxattr(ctx, idata.ino(), name, size),
@@ -459,6 +485,8 @@ impl<D: AsyncDrive, S: BitmapSlice> FileSystem<S> for Vfs<D, S> {
     }
 
     fn removexattr(&self, ctx: &Context, inode: VfsInode, name: &CStr) -> Result<()> {
+        validate_path_component(name)?;
+
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.removexattr(ctx, idata.ino(), name),
             (Right(fs), idata) => fs.removexattr(ctx, idata.ino(), name),

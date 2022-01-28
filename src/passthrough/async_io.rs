@@ -14,9 +14,7 @@ use crate::api::filesystem::{
 use crate::api::CreateIn;
 use crate::async_util::{AsyncDrive, AsyncUtil};
 
-impl<D: AsyncDrive + Sync, S: 'static + BitmapSlice + Send + Sync> BackendFileSystem<D, S>
-    for PassthroughFs<D, S>
-{
+impl<D: AsyncDrive + Sync> BackendFileSystem<D> for PassthroughFs<D> {
     fn mount(&self) -> io::Result<(Entry, u64)> {
         let entry = self.do_lookup(fuse::ROOT_ID, &CString::new(".").unwrap())?;
         Ok((entry, VFS_MAX_INO))
@@ -34,7 +32,7 @@ impl<'a> InodeData {
     }
 }
 
-impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
+impl<D: AsyncDrive> PassthroughFs<D> {
     async fn async_open_file(
         &self,
         ctx: &Context,
@@ -52,8 +50,18 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
             .map(|fd| unsafe { File::from_raw_fd(fd as i32) })
     }
 
-    async fn async_open_proc_file(&self, ctx: &Context, fd: RawFd, flags: i32) -> io::Result<File> {
-        let pathname = CString::new(format!("self/fd/{}", fd))
+    async fn async_open_proc_file(
+        &self,
+        ctx: &Context,
+        fd: RawFd,
+        flags: i32,
+        mode: u32,
+    ) -> io::Result<File> {
+        if !is_safe_inode(mode) {
+            return Err(ebadf());
+        }
+
+        let pathname = CString::new(format!("{}", fd))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // We don't really check `flags` because if the kernel can't handle poorly specified flags
@@ -61,7 +69,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         // we need to follow the `/proc/self/fd` symlink to get the file.
         self.async_open_file(
             ctx,
-            self.proc.as_raw_fd(),
+            self.proc_self_fd.as_raw_fd(),
             pathname.as_c_str(),
             (flags | libc::O_CLOEXEC) & (!libc::O_NOFOLLOW),
             0,
@@ -78,7 +86,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         reopen_dir: F,
     ) -> io::Result<(FileOrHandle, InodeStat, InodeAltKey, Option<InodeAltKey>)>
     where
-        F: FnOnce(RawFd, libc::c_int) -> io::Result<File>,
+        F: FnOnce(RawFd, libc::c_int, u32) -> io::Result<File>,
     {
         let handle = if self.cfg.inode_file_handles {
             FileHandle::from_name_at_with_mount_fds(dir_fd, name, &self.mount_fds, reopen_dir)
@@ -161,7 +169,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         let data = self.inode_map.get(inode)?;
         let file = data.async_get_file(&self.mount_fds).await?;
 
-        self.async_open_proc_file(ctx, file.as_raw_fd(), flags)
+        self.async_open_proc_file(ctx, file.as_raw_fd(), flags, data.mode)
             .await
     }
 
@@ -204,7 +212,7 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
         &self,
         ctx: &Context,
         inode: Inode,
-        handle: Option<<Self as FileSystem<S>>::Handle>,
+        handle: Option<<Self as FileSystem>::Handle>,
     ) -> io::Result<(libc::stat64, Duration)> {
         let st;
         let fd;
@@ -297,20 +305,23 @@ impl<D: AsyncDrive, S: BitmapSlice + Send + Sync> PassthroughFs<D, S> {
 }
 
 #[async_trait]
-impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
-    for PassthroughFs<D, S>
-{
+impl<D: AsyncDrive + Sync> AsyncFileSystem<D> for PassthroughFs<D> {
     async fn async_lookup(
         &self,
         ctx: &Context,
-        parent: <Self as FileSystem<S>>::Inode,
+        parent: <Self as FileSystem>::Inode,
         name: &CStr,
     ) -> io::Result<Entry> {
+        // Don't use is_safe_path_component(), allow "." and ".." for NFS export support
+        if name.to_bytes_with_nul().contains(&SLASH_ASCII) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
         let dir = self.inode_map.get(parent)?;
         let dir_file = dir.async_get_file(&self.mount_fds).await?;
         let (file_or_handle, st, ids_altkey, handle_altkey) = self
-            .async_open_file_or_handle(&ctx, dir_file.as_raw_fd(), name, |fd, flags| {
-                Self::open_proc_file(&self.proc, fd, flags)
+            .async_open_file_or_handle(&ctx, dir_file.as_raw_fd(), name, |fd, flags, mode| {
+                Self::open_proc_file(&self.proc_self_fd, fd, flags, mode)
             })
             .await?;
 
@@ -392,7 +403,7 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
                     InodeMap::insert_locked(
                         inodes.deref_mut(),
                         inode,
-                        InodeData::new(inode, file_or_handle, 1, ids_altkey),
+                        InodeData::new(inode, file_or_handle, 1, ids_altkey, st.get_stat().st_mode),
                         ids_altkey,
                         handle_altkey,
                     );
@@ -414,8 +425,8 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_getattr(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
-        handle: Option<<Self as FileSystem<S>>::Handle>,
+        inode: <Self as FileSystem>::Inode,
+        handle: Option<<Self as FileSystem>::Handle>,
     ) -> io::Result<(libc::stat64, Duration)> {
         self.async_do_getattr(&ctx, inode, handle).await
     }
@@ -423,9 +434,9 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_setattr(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
+        inode: <Self as FileSystem>::Inode,
         attr: libc::stat64,
-        handle: Option<<Self as FileSystem<S>>::Handle>,
+        handle: Option<<Self as FileSystem>::Handle>,
         valid: SetattrValid,
     ) -> io::Result<(libc::stat64, Duration)> {
         enum Data {
@@ -458,7 +469,7 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
                 match data {
                     Data::Handle(_, fd) => libc::fchmod(fd, attr.st_mode),
                     Data::ProcPath(ref p) => {
-                        libc::fchmodat(self.proc.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
+                        libc::fchmodat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), attr.st_mode, 0)
                     }
                 }
             };
@@ -555,7 +566,7 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
             let res = match data {
                 Data::Handle(_, fd) => unsafe { libc::futimens(fd, tvs.as_ptr()) },
                 Data::ProcPath(ref p) => unsafe {
-                    libc::utimensat(self.proc.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
+                    libc::utimensat(self.proc_self_fd.as_raw_fd(), p.as_ptr(), tvs.as_ptr(), 0)
                 },
             };
             if res < 0 {
@@ -569,10 +580,10 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_open(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
+        inode: <Self as FileSystem>::Inode,
         flags: u32,
         fuse_flags: u32,
-    ) -> io::Result<(Option<<Self as FileSystem<S>>::Handle>, OpenOptions)> {
+    ) -> io::Result<(Option<<Self as FileSystem>::Handle>, OpenOptions)> {
         if self.no_open.load(Ordering::Relaxed) {
             info!("fuse: open is not supported.");
             Err(io::Error::from_raw_os_error(libc::ENOSYS))
@@ -584,10 +595,12 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_create(
         &self,
         ctx: &Context,
-        parent: <Self as FileSystem<S>>::Inode,
+        parent: <Self as FileSystem>::Inode,
         name: &CStr,
         args: CreateIn,
-    ) -> io::Result<(Entry, Option<<Self as FileSystem<S>>::Handle>, OpenOptions)> {
+    ) -> io::Result<(Entry, Option<<Self as FileSystem>::Handle>, OpenOptions)> {
+        self.validate_path_component(name)?;
+
         let dir = self.inode_map.get(parent)?;
         let dir_file = dir.async_get_file(&self.mount_fds).await?;
 
@@ -602,11 +615,12 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
             )?
         };
 
-        // Safe because this doesn't modify any memory and we check the return value. We don't
-        // really check `flags` because if the kernel can't handle poorly specified flags then we
-        // have much bigger problems.
+        let entry = self.async_lookup(ctx, parent, name).await?;
         let file = match new_file {
+            // File didn't exist, now created by create_file_excl()
             Some(f) => f,
+            // File exists, and args.flags doesn't contain O_EXCL. Now let's open it with
+            // open_inode().
             None => {
                 // Cap restored when _killpriv is dropped
                 let _killpriv = if self.killpriv_v2.load(Ordering::Relaxed)
@@ -618,17 +632,10 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
                 };
 
                 let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
-
-                Self::open_file(
-                    dir_file.as_raw_fd(),
-                    name,
-                    args.flags as i32 | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    args.mode & !(args.umask & 0o777),
-                )?
+                self.async_open_inode(ctx, entry.inode, args.flags as i32)
+                    .await?
             }
         };
-
-        let entry = self.async_lookup(ctx, parent, name).await?;
 
         let ret_handle = if !self.no_open.load(Ordering::Relaxed) {
             let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
@@ -654,9 +661,9 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_read(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
-        handle: <Self as FileSystem<S>>::Handle,
-        w: &mut (dyn AsyncZeroCopyWriter<D, S> + Send),
+        inode: <Self as FileSystem>::Inode,
+        handle: <Self as FileSystem>::Handle,
+        w: &mut (dyn AsyncZeroCopyWriter<D> + Send),
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -677,9 +684,9 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_write(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
-        handle: <Self as FileSystem<S>>::Handle,
-        r: &mut (dyn AsyncZeroCopyReader<D, S> + Send),
+        inode: <Self as FileSystem>::Inode,
+        handle: <Self as FileSystem>::Handle,
+        r: &mut (dyn AsyncZeroCopyReader<D> + Send),
         size: u32,
         offset: u64,
         _lock_owner: Option<u64>,
@@ -715,9 +722,9 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_fsync(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
+        inode: <Self as FileSystem>::Inode,
         datasync: bool,
-        handle: <Self as FileSystem<S>>::Handle,
+        handle: <Self as FileSystem>::Handle,
     ) -> io::Result<()> {
         let data = self
             .async_get_data(&ctx, handle, inode, libc::O_RDONLY)
@@ -732,8 +739,8 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_fallocate(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
-        handle: <Self as FileSystem<S>>::Handle,
+        inode: <Self as FileSystem>::Inode,
+        handle: <Self as FileSystem>::Handle,
         mode: u32,
         offset: u64,
         length: u64,
@@ -752,9 +759,9 @@ impl<D: AsyncDrive + Sync, S: BitmapSlice + Send + Sync> AsyncFileSystem<D, S>
     async fn async_fsyncdir(
         &self,
         ctx: &Context,
-        inode: <Self as FileSystem<S>>::Inode,
+        inode: <Self as FileSystem>::Inode,
         datasync: bool,
-        handle: <Self as FileSystem<S>>::Handle,
+        handle: <Self as FileSystem>::Handle,
     ) -> io::Result<()> {
         self.async_fsync(ctx, inode, datasync, handle).await
     }

@@ -33,7 +33,7 @@ struct AsyncZcReader<'a, S: BitmapSlice = ()>(Reader<'a, S>);
 unsafe impl<'a, S: BitmapSlice> Send for Reader<'a, S> {}
 
 #[async_trait]
-impl<'a, D: AsyncDrive, S: BitmapSlice> AsyncZeroCopyReader<D, S> for AsyncZcReader<'a, S> {
+impl<'a, D: AsyncDrive, S: BitmapSlice> AsyncZeroCopyReader<D> for AsyncZcReader<'a, S> {
     async fn async_read_to(
         &mut self,
         drive: D,
@@ -46,11 +46,9 @@ impl<'a, D: AsyncDrive, S: BitmapSlice> AsyncZeroCopyReader<D, S> for AsyncZcRea
 }
 
 impl<'a, S: BitmapSlice> ZeroCopyReader for AsyncZcReader<'a, S> {
-    type S = S;
-
     fn read_to(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize> {
@@ -72,9 +70,7 @@ struct AsyncZcWriter<'a, S: BitmapSlice = ()>(Writer<'a, S>);
 unsafe impl<'a, S: BitmapSlice> Send for Writer<'a, S> {}
 
 #[async_trait]
-impl<'a, D: AsyncDrive + 'static, S: BitmapSlice> AsyncZeroCopyWriter<D, S>
-    for AsyncZcWriter<'a, S>
-{
+impl<'a, D: AsyncDrive + 'static, S: BitmapSlice> AsyncZeroCopyWriter<D> for AsyncZcWriter<'a, S> {
     async fn async_write_from(
         &mut self,
         drive: D,
@@ -87,11 +83,9 @@ impl<'a, D: AsyncDrive + 'static, S: BitmapSlice> AsyncZeroCopyWriter<D, S>
 }
 
 impl<'a, S: BitmapSlice> ZeroCopyWriter for AsyncZcWriter<'a, S> {
-    type S = S;
-
     fn write_from(
         &mut self,
-        f: &mut dyn FileReadWriteVolatile<S>,
+        f: &mut dyn FileReadWriteVolatile,
         count: usize,
         off: u64,
     ) -> io::Result<usize> {
@@ -109,7 +103,7 @@ impl<'a, S: BitmapSlice> io::Write for AsyncZcWriter<'a, S> {
     }
 }
 
-impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
+impl<F: AsyncFileSystem<D> + Sync, D: AsyncDrive> Server<F, D> {
     /// Main entrance to handle requests from the transport layer.
     ///
     /// It receives Fuse requests from transport layers, parses the request according to Fuse ABI,
@@ -122,7 +116,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
     /// `Future` object returned has completed. Other subsystems, such as the transport layer, rely
     /// on the invariant.
     #[allow(unused_variables)]
-    pub async unsafe fn async_handle_message(
+    pub async unsafe fn async_handle_message<S: BitmapSlice>(
         &self,
         drive: D,
         mut r: Reader<'_, S>,
@@ -218,7 +212,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         res
     }
 
-    async fn async_lookup(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_lookup<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let buf = ServerUtil::get_message_body(&mut ctx.r, &ctx.in_header, 0)?;
         let name = bytes_to_cstr(buf.as_ref())?;
         let result = self
@@ -246,7 +243,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_getattr(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_getattr<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let GetattrIn { flags, fh, .. } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let handle = if (flags & GETATTR_FH) != 0 {
             Some(fh.into())
@@ -261,7 +261,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         ctx.async_handle_attr_result(result).await
     }
 
-    async fn async_setattr(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_setattr<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let setattr_in: SetattrIn = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let handle = if setattr_in.valid & FATTR_FH != 0 {
             Some(setattr_in.fh.into())
@@ -278,7 +281,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         ctx.async_handle_attr_result(result).await
     }
 
-    async fn async_open(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_open<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
         let OpenIn { flags, fuse_flags } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let result = self
             .fs
@@ -298,7 +301,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_read(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_read<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
         let ReadIn {
             fh,
             offset,
@@ -365,7 +368,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_write(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_write<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
         let WriteIn {
             fh,
             offset,
@@ -418,7 +421,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_fsync(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_fsync<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
         let FsyncIn {
             fh, fsync_flags, ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
@@ -434,7 +437,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_fsyncdir(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_fsyncdir<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let FsyncIn {
             fh, fsync_flags, ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
@@ -450,7 +456,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_create(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_create<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let args: CreateIn = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let buf = ServerUtil::get_message_body(&mut ctx.r, &ctx.in_header, size_of::<CreateIn>())?;
         let name = bytes_to_cstr(&buf)?;
@@ -484,7 +493,10 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
         }
     }
 
-    async fn async_fallocate(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
+    async fn async_fallocate<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, D, S>,
+    ) -> Result<usize> {
         let FallocateIn {
             fh,
             offset,
@@ -504,7 +516,7 @@ impl<F: AsyncFileSystem<D, S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D
     }
 }
 
-impl<'a, F: AsyncFileSystem<D, S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
+impl<'a, F: AsyncFileSystem<D>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
     fn with_drive(in_header: InHeader, r: Reader<'a, S>, w: Writer<'a, S>, drive: D) -> Self {
         let mut ctx = Self::new(in_header, r, w);
 
