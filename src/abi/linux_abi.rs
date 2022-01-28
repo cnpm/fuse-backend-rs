@@ -569,6 +569,7 @@ pub struct Attr {
     pub blksize: u32,
     #[cfg(target_os = "linux")]
     pub flags: u32,
+    #[cfg(target_os = "macos")]
     pub padding: u32,
 }
 unsafe impl ByteValued for Attr {}

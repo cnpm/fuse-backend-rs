@@ -16,12 +16,17 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use core_foundation_sys::base::CFRelease;
+use core_foundation_sys::string::{CFStringCreateWithBytes, kCFStringEncodingUTF8};
+use core_foundation_sys::url::{CFURLCreateWithFileSystemPath, CFURLPathStyle, kCFURLPOSIXPathStyle};
+use diskarbitration_sys::base::{DADiskUnmount, kDADiskUnmountOptionForce};
+use diskarbitration_sys::disk::{DADiskCreateFromVolumePath, DADiskRef};
+use diskarbitration_sys::session::{DASessionCreate, DASessionRef};
 
 use libc::{sysconf, _SC_PAGESIZE};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
-#[cfg(target_os = "linux")]
-use nix::mount::{mount, umount2, MntFlags, MsFlags};
+use nix::NixPath;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::unistd::{getgid, getuid, read};
 
@@ -31,11 +36,19 @@ use super::{Error::SessionFailure, FuseBuf, Reader, Result, Writer, macfuse};
 const FUSE_KERN_BUF_SIZE: usize = 256;
 const FUSE_HEADER_SIZE: usize = 0x1000;
 
-const FUSE_DEVICE: &str = "/dev/fuse";
-const FUSE_FSTYPE: &str = "fuse";
-
 const FUSE_DEV_EVENT: u32 = 0;
 const EXIT_FUSE_EVENT: u32 = 1;
+
+mod ioctl {
+    use nix::ioctl_write_ptr;
+
+    // #define FUSEDEVIOCSETDAEMONDEAD _IOW('F', 3,  u_int32_t)
+    const FUSE_FD_DEAD_MAGIC: u8 = 'F' as u8;
+    const FUSE_FD_DEAD:u8 = 3;
+    ioctl_write_ptr!(set_fuse_fd_dead, FUSE_FD_DEAD_MAGIC, FUSE_FD_DEAD, u32);
+}
+
+
 
 /// A fuse session manager to manage the connection with the in kernel fuse driver.
 pub struct FuseSession {
@@ -44,6 +57,8 @@ pub struct FuseSession {
     subtype: String,
     file: Option<File>,
     bufsize: usize,
+    disk: Option<DADiskRef>,
+    dasession: DASessionRef,
 }
 
 impl FuseSession {
@@ -62,14 +77,18 @@ impl FuseSession {
             subtype: subtype.to_owned(),
             file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
+            disk: None,
+            dasession: unsafe { DASessionCreate(std::ptr::null()) },
         })
     }
 
     /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
     pub fn mount(&mut self) -> Result<()> {
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype)?;
+        let disk = create_disk(&self.mountpoint, self.dasession);
 
         self.file = Some(file);
+        self.disk = Some(disk);
 
         Ok(())
     }
@@ -88,7 +107,9 @@ impl FuseSession {
     pub fn umount(&mut self) -> Result<()> {
         if let Some(file) = self.file.take() {
             if let Some(mountpoint) = self.mountpoint.to_str() {
-                fuse_kern_umount(mountpoint, file)
+                let disk = self.disk;
+                self.disk = None;
+                fuse_kern_umount(file, disk)
             } else {
                 Err(SessionFailure("invalid mountpoint".to_string()))
             }
@@ -259,22 +280,60 @@ fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str) -> Result<Fil
     }
 }
 
+fn create_disk(mountpoint: &Path, dasession: DASessionRef) -> DADiskRef {
+    unsafe {
+        let mut mountpoint_argv = String::from(mountpoint.to_str().unwrap());
+        let mut mountpoint_argv = CString::new(mountpoint_argv).unwrap();
+        let mut mountpoint_argv = mountpoint_argv.as_ptr();
+        let url_str = CFStringCreateWithBytes(
+            std::ptr::null(),
+            std::mem::transmute(mountpoint_argv),
+            mountpoint.len() as i64,
+            kCFStringEncodingUTF8,
+            1u8,
+            std::ptr::null());
+        let url = CFURLCreateWithFileSystemPath(std::ptr::null(), url_str, kCFURLPOSIXPathStyle, 1u8);
+        let disk = DADiskCreateFromVolumePath(std::ptr::null(), dasession, url);
+        CFRelease(std::mem::transmute(url_str));
+        CFRelease(std::mem::transmute(url));
+        disk
+    }
+
+}
+
 /// Umount a fuse file system
-fn fuse_kern_umount(mountpoint: &str, file: File) -> Result<()> {
+fn fuse_kern_umount(file: File, disk: Option<DADiskRef>) -> Result<()> {
+    let fd = file.as_raw_fd();
+    if let Err(e) = set_fuse_fd_dead(file.as_raw_fd()) {
+        return Err(SessionFailure(String::from("ioctl set fuse deamon dead failed")));
+    }
     drop(file);
 
-    let mut mountpoint_argv = CString::new(mountpoint).unwrap();
-    let mountpoint_argv = mountpoint_argv.as_ptr();
-    unsafe {
-        macfuse::fuse_unmount_compat22(mountpoint_argv);
+    if let Some(disk) = disk {
+        unsafe {
+            DADiskUnmount(disk, kDADiskUnmountOptionForce, None, std::ptr::null_mut());
+            CFRelease(std::mem::transmute(disk));
+        }
     }
     return Ok(())
 }
 
+fn set_fuse_fd_dead(fd: RawFd) -> std::io::Result<()> {
+    unsafe {
+        match ioctl::set_fuse_fd_dead(fd, std::mem::transmute(&fd)) {
+            Ok(i) => {
+                return Ok(());
+            },
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use super::*;
-    use std::os::unix::io::FromRawFd;
+    use std::os::unix::io::{FromRawFd, RawFd};
     use std::path::Path;
     use vmm_sys_util::tempdir::TempDir;
 
@@ -430,10 +489,12 @@ mod asyncio {
     #[cfg(test)]
     mod tests {
         use std::os::unix::io::AsRawFd;
+        use std::sync::Arc;
 
         use super::*;
         use crate::api::{Vfs, VfsOptions};
-        use crate::async_util::{AsyncDriver, AsyncExecutor};
+        use crate::api::server::Server;
+        use crate::async_util::{AsyncDriver, AsyncExecutor, AsyncExecutorState};
 
         #[test]
         fn test_fuse_task() {

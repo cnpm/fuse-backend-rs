@@ -4,3 +4,6 @@
 
 #[cfg(feature = "fusedev")]
 pub(crate) mod passthroughfs;
+
+#[cfg(feature = "macfuse")]
+pub(crate) mod macfuse;

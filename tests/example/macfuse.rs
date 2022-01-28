@@ -1,65 +1,31 @@
+// Copyright 2021 Ant Group. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use std::any::Any;
 use std::ffi::CStr;
-use std::mem::size_of;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-
-use vm_memory::bitmap::BitmapSlice;
-use fuse_backend_rs::abi::linux_abi::{Attr, FsOptions, InHeader, InitIn, Opcode, OpenOptions, OutHeader, SetattrValid};
-
-#[macro_use]
-extern crate log;
-extern crate simple_logger;
-
-#[cfg(feature = "macfuse")]
-use fuse_backend_rs::transport::macfuse::{FuseSession};
-use simple_logger::SimpleLogger;
-
-
-use std::io;
-use std::io::{ErrorKind, IoSlice, Write};
+use std::io::Result;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::sleep;
+use std::path::Path;
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, SystemTime};
-use libc::{stat, time_t};
-use log::LevelFilter;
-use vm_memory::ByteValued;
-use fuse_backend_rs::api::{BackendFileSystem, CreateIn, Vfs, VfsOptions};
-use fuse_backend_rs::api::filesystem::{Context, DirEntry, Entry, FileSystem, GetxattrReply, ListxattrReply, ROOT_ID, ZeroCopyReader, ZeroCopyWriter};
-use fuse_backend_rs::api::server::Server;
+use libc::time_t;
+
+use fuse_backend_rs::abi::linux_abi::Attr;
+
+use fuse_backend_rs::api::{BackendFileSystem, server::Server, Vfs, VfsOptions};
+use fuse_backend_rs::api::filesystem::{Context, DirEntry, Entry, FileSystem, ZeroCopyWriter};
 use fuse_backend_rs::async_util::AsyncDriver;
-use fuse_backend_rs::transport::FsCacheReqHandler;
-
-/// Error codes for Fuse related operations.
-#[derive(Debug)]
-pub enum Error {
-    /// Failed to decode protocol messages.
-    DecodeMessage(io::Error),
-    /// Failed to encode protocol messages.
-    EncodeMessage(io::Error),
-    /// One or more parameters are missing.
-    MissingParameter,
-    /// A C string parameter is invalid.
-    // InvalidCString(FromBytesWithNulError),
-    /// The `len` field of the header is too small.
-    InvalidHeaderLength,
-    /// The `size` field of the `SetxattrIn` message does not match the length
-    /// of the decoded value.
-    InvalidXattrSize((u32, usize)),
-}
-
-const MAX_BUFFER_SIZE: u32 = 1 << 20;
-
+use fuse_backend_rs::transport::macfuse::{FuseChannel, FuseSession};
 
 pub(crate) struct HelloFileSystem {
-    exit_fd: RawFd,
 }
 
 impl FileSystem for HelloFileSystem {
     type Inode = u64;
     type Handle = u64;
-    fn lookup(&self, _: &Context, parent: Self::Inode, name: &CStr) -> Result<Entry, io::Error> {
+    fn lookup(&self, _: &Context, parent: Self::Inode, name: &CStr) -> Result<Entry> {
         let content = "hello, fuse".as_bytes();
         let now = SystemTime::now();
         let time = now
@@ -96,11 +62,10 @@ impl FileSystem for HelloFileSystem {
         })
     }
 
-    fn readdir(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, size: u32, offset: u64, add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>) -> io::Result<()> {
+    fn readdir(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, size: u32, offset: u64, add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>) -> Result<()> {
         if offset != 0 {
             return Ok(());
         }
-        println!("read dir: {:?} {:?}", size, offset);
         let mut offset: usize = offset as usize;
         let entry = DirEntry {
             ino: 1,
@@ -128,7 +93,7 @@ impl FileSystem for HelloFileSystem {
         Ok(())
     }
 
-    fn read(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, w: &mut dyn ZeroCopyWriter<S=()>, size: u32, offset: u64, lock_owner: Option<u64>, flags: u32) -> io::Result<usize> {
+    fn read(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, w: &mut dyn ZeroCopyWriter<S=()>, size: u32, offset: u64, lock_owner: Option<u64>, flags: u32) -> Result<usize> {
         let offset = offset as usize;
         let content = "hello, fuse".as_bytes();
         let mut buf = Vec::<u8>::with_capacity(size as usize);
@@ -139,18 +104,12 @@ impl FileSystem for HelloFileSystem {
             size as usize
         };
         let read_end = (offset as usize) + read_size;
-        println!("size {} offset {} read_end {}", size, offset, read_end);
         buf.extend_from_slice(&content[(offset as usize)..(read_end as usize)]);
         w.write(buf.as_slice());
         Ok(read_size)
     }
 
-    fn destroy(&self) {
-        nix::unistd::write(self.exit_fd, &[1]);
-    }
-
-    fn getattr(&self, ctx: &Context, inode: Self::Inode, handle: Option<Self::Handle>) -> io::Result<(libc::stat, Duration)> {
-        println!("get attr: {}", inode);
+    fn getattr(&self, ctx: &Context, inode: Self::Inode, handle: Option<Self::Handle>) -> Result<(libc::stat, Duration)> {
         if inode == 1 {
             let now = SystemTime::now();
             let time = now
@@ -215,13 +174,13 @@ impl FileSystem for HelloFileSystem {
         }
     }
 
-    fn access(&self, ctx: &Context, inode: Self::Inode, mask: u32) -> io::Result<()> {
+    fn access(&self, ctx: &Context, inode: Self::Inode, mask: u32) -> Result<()> {
         return Ok(());
     }
 }
 
 impl BackendFileSystem<AsyncDriver, ()> for HelloFileSystem {
-    fn mount(&self) -> Result<(Entry, u64), io::Error> {
+    fn mount(&self) -> Result<(Entry, u64)> {
         Ok((
             Entry {
                 inode: 1,
@@ -240,53 +199,111 @@ impl BackendFileSystem<AsyncDriver, ()> for HelloFileSystem {
     }
 }
 
-fn main() {
-    SimpleLogger::new()
-        .with_level(LevelFilter::Trace)
-        .with_utc_timestamps()
-        .init()
-        .unwrap();
+/// A fusedev daemon example
+pub struct Daemon {
+    mountpoint: String,
+    server: Arc<Server<Arc<Vfs<AsyncDriver>>>>,
+    thread_cnt: u32,
+    exit_fd: RawFd,
+    wait_exit_fd: RawFd,
+    session: Option<FuseSession>,
+}
+
+impl Daemon {
+    /// Creates a fusedev daemon instance
+    pub fn new(mountpoint: &str, thread_cnt: u32) -> Result<Self> {
+        // create vfs
+        let vfs = Vfs::new(VfsOptions {
+            no_open: false,
+            no_opendir: false,
+            ..Default::default()
+        });
 
 
-    let mut options = VfsOptions::default();
-    options.in_opts = FsOptions::EXPORT_SUPPORT;
-    let vfs = Vfs::<AsyncDriver>::new(options);
+        let ( rx, sx ) = nix::unistd::pipe().unwrap();
+        let fs = HelloFileSystem {};
+        vfs.mount(Box::new(fs), "/").unwrap();
 
-    let ( rx, sx ) = nix::unistd::pipe().unwrap();
-    let fs = HelloFileSystem {
-        exit_fd: sx,
-    };
-    vfs.mount(Box::new(fs), "/");
+        Ok(Daemon {
+            mountpoint: mountpoint.to_string(),
+            server: Arc::new(Server::new(Arc::new(vfs))),
+            thread_cnt,
+            exit_fd: sx,
+            wait_exit_fd: rx,
+            session: None,
+        })
+    }
 
-    let mount_point = Path::new("/Users/killa/workspace/project/test2/hello");
-    info!("start session!!!");
-    let mut session = FuseSession::new(mount_point, "npmfs", "").unwrap();
-    info!("start mount!!!");
-    session.mount().unwrap();
-    info!("mount end!!!");
+    /// Mounts a fusedev daemon to the mountpoint, then start service threads to handle
+    /// FUSE requests.
+    pub fn mount(&mut self) -> Result<()> {
+        let mut se = FuseSession::new(Path::new(&self.mountpoint), "passthru_example", "").unwrap();
+        se.mount().unwrap();
+        for _ in 0..self.thread_cnt {
+            let mut server = FuseServer {
+                server: self.server.clone(),
+                ch: se.new_channel(self.wait_exit_fd).unwrap(),
+            };
+            let _thread = thread::Builder::new()
+                .name("fuse_server".to_string())
+                .spawn(move || {
+                    info!("new fuse thread");
+                    let _ = server.svc_loop();
+                    warn!("fuse service thread exits");
+                })
+                .unwrap();
+        }
+        self.session = Some(se);
+        Ok(())
+    }
 
-    let server = Server::<Vfs<AsyncDriver>, AsyncDriver>::new(vfs);
-    let server = Arc::new(server);
-    let mut channel = session.new_channel(rx).unwrap();
-    loop {
-        match channel.get_request() {
-            Ok(request) => {
-                match request {
-                    Some((reader, writer)) => {
-                        println!("get request!!!");
-                        server.handle_message(reader, writer, None, None);
-                    },
-                    None => {
-                        println!("get no request");
-                        break;
+    /// Umounts and destroies a fusedev daemon
+    pub fn umount(&mut self) -> Result<()> {
+        if let Some(mut se) = self.session.take() {
+            se.umount().unwrap();
+        }
+        nix::unistd::write(self.exit_fd, &[1])?;
+        Ok(())
+    }
+}
 
-                    },
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.umount();
+    }
+}
+
+struct FuseServer {
+    server: Arc<Server<Arc<Vfs<AsyncDriver>>>>,
+    ch: FuseChannel,
+}
+
+impl FuseServer {
+    fn svc_loop(&mut self) -> Result<()> {
+        // Given error EBADF, it means kernel has shut down this session.
+        let _ebadf = std::io::Error::from_raw_os_error(libc::EBADF);
+        loop {
+            if let Some((reader, writer)) = self
+                .ch
+                .get_request()
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?
+            {
+                if let Err(e) = self.server.handle_message(reader, writer, None, None) {
+                    match e {
+                        fuse_backend_rs::Error::EncodeMessage(_ebadf) => {
+                            break;
+                        }
+                        _ => {
+                            error!("Handling fuse message failed");
+                            continue;
+                        }
+                    }
                 }
-            },
-            Err(e) => {
-                println!("get request error: {:?}", e);
+            } else {
+                info!("fuse server exits");
                 break;
             }
         }
+        Ok(())
     }
 }

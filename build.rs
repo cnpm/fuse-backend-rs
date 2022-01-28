@@ -1,9 +1,11 @@
+#[cfg(feature = "macfuse")]
 extern crate bindgen;
 
 use std::env;
 use std::path::PathBuf;
 
-fn main() {
+#[cfg(feature = "macfuse")]
+fn link_macfuse() {
     println!("cargo:rustc-link-lib=fuse");
     println!("cargo:rerun-if-changed=wrapper.h");
 
@@ -29,5 +31,10 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+fn main() {
+    #[cfg(feature = "macfuse")]
+    link_macfuse();
 }
 

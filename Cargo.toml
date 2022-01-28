@@ -16,8 +16,8 @@ repository = "https://github.com/cloud-hypervisor/fuse-backend-rs"
 homepage = "https://github.com/cloud-hypervisor/"
 
 [build-dependencies]
-built = { version = "=0.4.3", features = ["git2", "chrono"] }
-bindgen = "0.53.1"
+built = { version = "=0.4.3", features = ["git2", "chrono"], optional = true }
+bindgen = { version = "0.53.1", optional = true }
 
 [dependencies]
 arc-swap = ">=0.4.6"
@@ -36,8 +36,9 @@ vm-memory = "0.6"
 
 simple_logger = "1.16.0"
 
-core-foundation = "0.9.2"
+core-foundation-sys = "0.2.3"
 diskarbitration-sys = "0.0.4"
+
 
 [target.'cfg(linux)'.dependencies]
 caps = { version = "0.5.1", optional = true }
@@ -49,8 +50,8 @@ vmm-sys-util = "0.8"
 vm-memory = { version = "0.6", features = ["backend-mmap"] }
 
 [features]
-default = []
-macfuse = []
+default = ["fusedev"]
+macfuse = ["built", "bindgen"]
 #async-io = ["async-trait", "futures", "iou", "ringbahn", "caps]
 fusedev = ["vmm-sys-util", "caps"]
 #virtiofs = ["vm-virtio", "caps]

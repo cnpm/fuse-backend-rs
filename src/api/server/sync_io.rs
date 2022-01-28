@@ -3,7 +3,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
-use std::fmt::Debug;
 use std::io::{self, IoSlice, Write};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -619,7 +618,15 @@ impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
         }
 
         // These fuse features are supported by this server by default.
-        let supported = FsOptions::EXPORT_SUPPORT;
+        let supported = FsOptions::ASYNC_READ
+            | FsOptions::PARALLEL_DIROPS
+            | FsOptions::BIG_WRITES
+            | FsOptions::AUTO_INVAL_DATA
+            | FsOptions::ASYNC_DIO
+            | FsOptions::HAS_IOCTL_DIR
+            | FsOptions::MAX_PAGES
+            | FsOptions::EXPLICIT_INVAL_DATA
+            | FsOptions::PERFILE_DAX;
 
         let capable = FsOptions::from_bits_truncate(flags);
 
@@ -634,17 +641,9 @@ impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
                 let out = InitOut {
                     major: KERNEL_VERSION,
                     minor: KERNEL_MINOR_VERSION,
-                    max_readahead,
-                    // flags: enabled.bits(),
-                    flags: 0x10,
-                    #[cfg(target_os = "linux")]
+                    flags: enabled.bits(),
                     max_background: ::std::u16::MAX,
-                    #[cfg(target_os = "macos")]
-                    max_background: 0,
-                    #[cfg(target_os = "linux")]
                     congestion_threshold: (::std::u16::MAX / 4) * 3,
-                    #[cfg(target_os = "macos")]
-                    congestion_threshold: 0,
                     max_write: MAX_BUFFER_SIZE,
                     time_gran: 1,             // nanoseconds
                     max_pages: MAX_REQ_PAGES, // 1MB
@@ -1029,7 +1028,7 @@ impl<F: FileSystem<S> + Sync, D: AsyncDrive, S: BitmapSlice> Server<F, D, S> {
 }
 
 impl<'a, F: FileSystem<S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
-    fn reply_ok<T: ByteValued + Debug>(&mut self, out: Option<T>, data: Option<&[u8]>) -> Result<usize> {
+    fn reply_ok<T: ByteValued>(&mut self, out: Option<T>, data: Option<&[u8]>) -> Result<usize> {
         let data2 = out.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
         let data3 = data.unwrap_or(&[]);
         let len = size_of::<OutHeader>() + data2.len() + data3.len();
@@ -1039,9 +1038,6 @@ impl<'a, F: FileSystem<S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S
             unique: self.unique(),
         };
         trace!("fuse: new reply {:?}", header);
-        println!("headers: {:02x?}", header.as_slice());
-        println!("data2: {:02x?}", data2);
-        println!("data3: {:02x?}", data3);
 
         match (data2.len(), data3.len()) {
             (0, 0) => self
@@ -1084,7 +1080,6 @@ impl<'a, F: FileSystem<S>, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S
         } else {
             trace!("fuse: reply error header {:?}, error {:?}", header, err);
         }
-        println!("headers: {:02x?}", header.as_slice());
         self.w
             .write_all(header.as_slice())
             .map_err(Error::EncodeMessage)?;
