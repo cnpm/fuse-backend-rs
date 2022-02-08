@@ -15,7 +15,7 @@ use std::ops::Deref;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use core_foundation_sys::base::CFRelease;
 use core_foundation_sys::string::{CFStringCreateWithBytes, kCFStringEncodingUTF8};
@@ -58,8 +58,8 @@ pub struct FuseSession {
     subtype: String,
     file: Option<File>,
     bufsize: usize,
-    disk: Option<DADiskRef>,
-    dasession: DASessionRef,
+    disk: Arc<Mutex<Option<DADiskRef>>>,
+    dasession: Arc<Mutex<DASessionRef>>,
 }
 
 impl FuseSession {
@@ -78,18 +78,20 @@ impl FuseSession {
             subtype: subtype.to_owned(),
             file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
-            disk: None,
-            dasession: unsafe { DASessionCreate(std::ptr::null()) },
+            disk: Arc::new(Mutex::new(None)),
+            dasession: Arc::new(Mutex::new(unsafe { DASessionCreate(std::ptr::null()) })),
         })
     }
 
     /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
     pub fn mount(&mut self) -> Result<()> {
+        let mut disk = self.disk.lock().expect("lock disk failed");
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype)?;
-        let disk = create_disk(&self.mountpoint, self.dasession);
+        let session = self.dasession.lock().expect("lock da session failed");
+        let mount_disk = create_disk(&self.mountpoint, *session.deref());
 
         self.file = Some(file);
-        self.disk = Some(disk);
+        *disk = Some(mount_disk);
 
         Ok(())
     }
@@ -108,9 +110,8 @@ impl FuseSession {
     pub fn umount(&mut self) -> Result<()> {
         if let Some(file) = self.file.take() {
             if let Some(mountpoint) = self.mountpoint.to_str() {
-                let disk = self.disk;
-                self.disk = None;
-                fuse_kern_umount(file, disk)
+                let mut disk = self.disk.lock().expect("lock disk failed");
+                fuse_kern_umount(file, disk.take())
             } else {
                 Err(SessionFailure("invalid mountpoint".to_string()))
             }
