@@ -62,6 +62,10 @@ pub struct FuseSession {
     dasession: Arc<Mutex<DASessionRef>>,
 }
 
+unsafe impl Send for FuseSession {
+
+}
+
 impl FuseSession {
     /// Create a new fuse session, without mounting/connecting to the in kernel fuse driver.
     pub fn new(mountpoint: &Path, fsname: &str, subtype: &str) -> Result<FuseSession> {
@@ -254,8 +258,10 @@ fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str) -> Result<Fil
             allocated: 0,
         };
 
+        let mut mountpoint_argv = String::from(mountpoint.to_str().unwrap());
+        let mut mountpoint_argv = CString::new(mountpoint_argv).unwrap();
         let fd = macfuse::fuse_mount_compat25(
-            mountpoint.to_str().unwrap().as_ptr() as *const libc::c_char,
+            mountpoint_argv.as_ptr(),
             (&mut args),
             // flags.bits as libc::c_int,
             // opts.as_str().as_ptr() as *mut libc::c_void,
