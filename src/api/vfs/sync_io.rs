@@ -1,13 +1,8 @@
 // Copyright 2020 Ant Financial. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(target_os = "linux")]
-use libc::{stat64, statvfs64};
-
-#[cfg(target_os = "macos")]
-use libc::{stat as stat64, statvfs as statvfs64};
-
 use super::*;
+use crate::abi::kernel_abi::{stat64, statvfs64};
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::abi::virtio_fs;
 use crate::async_util::AsyncDrive;

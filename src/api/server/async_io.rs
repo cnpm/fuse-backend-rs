@@ -9,17 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use vm_memory::ByteValued;
 
-#[cfg(target_os = "linux")]
-use libc::{stat64};
-
-#[cfg(target_os = "macos")]
-use libc::{stat as stat64};
-
-use super::{MetricsHook, Server, ServerUtil, SrvContext, MAX_BUFFER_SIZE};
-use crate::abi::linux_abi::*;
+use super::{MetricsHook, Server, ServerUtil, SrvContext};
+use crate::abi::kernel_abi::*;
 use crate::api::filesystem::{
     AsyncFileSystem, AsyncZeroCopyReader, AsyncZeroCopyWriter, ZeroCopyReader, ZeroCopyWriter,
 };
+use crate::api::server::MAX_BUFFER_SIZE;
 use crate::api::CreateIn;
 use crate::async_util::AsyncDrive;
 use crate::transport::{FileReadWriteVolatile, FsCacheReqHandler, Reader, Writer};

@@ -3,25 +3,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
+use super::{
+    Context, DirEntry, Entry, GetxattrReply, ListxattrReply, ZeroCopyReader, ZeroCopyWriter,
+};
+use crate::abi::kernel_abi::{stat64, statvfs64, CreateIn, FsOptions, OpenOptions, SetattrValid};
+#[cfg(feature = "virtiofs")]
+pub use crate::abi::virtio_fs::RemovemappingOne;
+#[cfg(feature = "virtiofs")]
+use crate::transport::virtiofs::FsCacheReqHandler;
 use std::ffi::CStr;
 use std::io;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(target_os = "macos")]
-use libc::{
-    stat as stat64,
-    statvfs as statvfs64,
-};
-use super::{
-    Context, DirEntry, Entry, GetxattrReply, ListxattrReply, ZeroCopyReader, ZeroCopyWriter,
-};
-use crate::abi::linux_abi::{CreateIn, FsOptions, OpenOptions, SetattrValid};
-#[cfg(feature = "virtiofs")]
-pub use crate::abi::virtio_fs::RemovemappingOne;
-#[cfg(feature = "virtiofs")]
-use crate::transport::virtiofs::FsCacheReqHandler;
 
 /// The main trait that connects a file system with a transport.
 #[allow(unused_variables)]

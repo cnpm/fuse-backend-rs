@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use libc::time_t;
 use std::any::Any;
 use std::ffi::CStr;
 use std::io::Result;
@@ -10,17 +11,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
-use libc::time_t;
 
-use fuse_backend_rs::abi::linux_abi::Attr;
+use fuse_backend_rs::abi::kernel_abi::Attr;
 
-use fuse_backend_rs::api::{BackendFileSystem, server::Server, Vfs, VfsOptions};
 use fuse_backend_rs::api::filesystem::{Context, DirEntry, Entry, FileSystem, ZeroCopyWriter};
+use fuse_backend_rs::api::{server::Server, BackendFileSystem, Vfs, VfsOptions};
 use fuse_backend_rs::async_util::AsyncDriver;
-use fuse_backend_rs::transport::macfuse::{FuseChannel, FuseSession};
+use fuse_backend_rs::transport::fusedev::{FuseChannel, FuseSession};
 
-pub(crate) struct HelloFileSystem {
-}
+pub(crate) struct HelloFileSystem {}
 
 impl FileSystem for HelloFileSystem {
     type Inode = u64;
@@ -47,7 +46,13 @@ impl FileSystem for HelloFileSystem {
                 mtimensec: 0,
                 ctimensec: 0,
                 crtimensec: 0,
-                mode: (libc::S_IFREG | libc::S_IREAD | libc::S_IEXEC | libc::S_IRGRP | libc::S_IXGRP | libc::S_IROTH | libc::S_IXOTH) as u32,
+                mode: (libc::S_IFREG
+                    | libc::S_IREAD
+                    | libc::S_IEXEC
+                    | libc::S_IRGRP
+                    | libc::S_IXGRP
+                    | libc::S_IROTH
+                    | libc::S_IXOTH) as u32,
                 nlink: 1,
                 uid: 0,
                 gid: 0,
@@ -55,14 +60,23 @@ impl FileSystem for HelloFileSystem {
                 flags: 0,
                 blksize: 4096,
                 padding: 0,
-            }.into(),
+            }
+            .into(),
             attr_flags: 0,
             attr_timeout: Duration::new(0, 0),
             entry_timeout: Duration::new(0, 0),
         })
     }
 
-    fn readdir(&self, ctx: &Context, inode: Self::Inode, handle: Self::Handle, size: u32, offset: u64, add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>) -> Result<()> {
+    fn readdir(
+        &self,
+        ctx: &Context,
+        inode: Self::Inode,
+        handle: Self::Handle,
+        size: u32,
+        offset: u64,
+        add_entry: &mut dyn FnMut(DirEntry) -> Result<usize>,
+    ) -> Result<()> {
         if offset != 0 {
             return Ok(());
         }
@@ -85,7 +99,7 @@ impl FileSystem for HelloFileSystem {
 
         let entry = DirEntry {
             ino: 2,
-            offset: offset  as u64,
+            offset: offset as u64,
             type_: libc::DT_REG as u32,
             name: "hello".as_bytes(),
         };
@@ -119,37 +133,51 @@ impl FileSystem for HelloFileSystem {
         Ok(read_size)
     }
 
-    fn getattr(&self, ctx: &Context, inode: Self::Inode, handle: Option<Self::Handle>) -> Result<(libc::stat, Duration)> {
+    fn getattr(
+        &self,
+        ctx: &Context,
+        inode: Self::Inode,
+        handle: Option<Self::Handle>,
+    ) -> Result<(libc::stat, Duration)> {
         if inode == 1 {
             let now = SystemTime::now();
             let time = now
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as time_t;
-            return Ok((libc::stat {
-                st_dev: 0,
-                st_mode: (libc::S_IFDIR | libc::S_IREAD | libc::S_IEXEC | libc::S_IRGRP | libc::S_IXGRP | libc::S_IROTH | libc::S_IXOTH),
-                st_nlink: 1,
-                st_ino: 1,
-                st_uid: 0,
-                st_gid: 0,
-                st_rdev: 0,
-                st_atime: time,
-                st_atime_nsec: 0,
-                st_mtime: time,
-                st_mtime_nsec: 0,
-                st_ctime: time,
-                st_ctime_nsec:0,
-                st_birthtime: 0,
-                st_birthtime_nsec:0,
-                st_size: 0,
-                st_blocks: 0,
-                st_blksize: 4096,
-                st_flags: 0,
-                st_gen: 0,
-                st_lspare: 0,
-                st_qspare: [0,0],
-            }, Duration::from_secs(1)));
+            return Ok((
+                libc::stat {
+                    st_dev: 0,
+                    st_mode: (libc::S_IFDIR
+                        | libc::S_IREAD
+                        | libc::S_IEXEC
+                        | libc::S_IRGRP
+                        | libc::S_IXGRP
+                        | libc::S_IROTH
+                        | libc::S_IXOTH),
+                    st_nlink: 1,
+                    st_ino: 1,
+                    st_uid: 0,
+                    st_gid: 0,
+                    st_rdev: 0,
+                    st_atime: time,
+                    st_atime_nsec: 0,
+                    st_mtime: time,
+                    st_mtime_nsec: 0,
+                    st_ctime: time,
+                    st_ctime_nsec: 0,
+                    st_birthtime: 0,
+                    st_birthtime_nsec: 0,
+                    st_size: 0,
+                    st_blocks: 0,
+                    st_blksize: 4096,
+                    st_flags: 0,
+                    st_gen: 0,
+                    st_lspare: 0,
+                    st_qspare: [0, 0],
+                },
+                Duration::from_secs(1),
+            ));
         } else {
             let content = "hello, fuse".as_bytes();
             let now = SystemTime::now();
@@ -157,30 +185,39 @@ impl FileSystem for HelloFileSystem {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as time_t;
-            return Ok((libc::stat {
-                st_dev: 0,
-                st_mode: (libc::S_IFREG | libc::S_IREAD | libc::S_IEXEC | libc::S_IRGRP | libc::S_IXGRP | libc::S_IROTH | libc::S_IXOTH),
-                st_nlink: 1,
-                st_ino: 1,
-                st_uid: 0,
-                st_gid: 0,
-                st_rdev: 0,
-                st_atime: time,
-                st_atime_nsec: 0,
-                st_mtime: time,
-                st_mtime_nsec: 0,
-                st_ctime: time,
-                st_ctime_nsec:0,
-                st_birthtime: 0,
-                st_birthtime_nsec:0,
-                st_size: content.len() as libc::off_t,
-                st_blocks: 1,
-                st_blksize: 4096,
-                st_flags: 0,
-                st_gen: 0,
-                st_lspare: 0,
-                st_qspare: [0,0],
-            }, Duration::from_secs(1)));
+            return Ok((
+                libc::stat {
+                    st_dev: 0,
+                    st_mode: (libc::S_IFREG
+                        | libc::S_IREAD
+                        | libc::S_IEXEC
+                        | libc::S_IRGRP
+                        | libc::S_IXGRP
+                        | libc::S_IROTH
+                        | libc::S_IXOTH),
+                    st_nlink: 1,
+                    st_ino: 1,
+                    st_uid: 0,
+                    st_gid: 0,
+                    st_rdev: 0,
+                    st_atime: time,
+                    st_atime_nsec: 0,
+                    st_mtime: time,
+                    st_mtime_nsec: 0,
+                    st_ctime: time,
+                    st_ctime_nsec: 0,
+                    st_birthtime: 0,
+                    st_birthtime_nsec: 0,
+                    st_size: content.len() as libc::off_t,
+                    st_blocks: 1,
+                    st_blksize: 4096,
+                    st_flags: 0,
+                    st_gen: 0,
+                    st_lspare: 0,
+                    st_qspare: [0, 0],
+                },
+                Duration::from_secs(1),
+            ));
         }
     }
 
@@ -229,8 +266,7 @@ impl Daemon {
             ..Default::default()
         });
 
-
-        let ( rx, sx ) = nix::unistd::pipe().unwrap();
+        let (rx, sx) = nix::unistd::pipe().unwrap();
         let fs = HelloFileSystem {};
         vfs.mount(Box::new(fs), "/").unwrap();
 

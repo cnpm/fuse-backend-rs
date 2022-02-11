@@ -18,7 +18,6 @@ use super::{FileReadWriteVolatile, IoBuffers, Reader};
 use crate::BitmapSlice;
 
 mod session;
-mod macfuse;
 pub use session::*;
 use crate::transport::FileVolatileSlice;
 

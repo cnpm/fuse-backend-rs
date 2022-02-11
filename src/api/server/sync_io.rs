@@ -7,21 +7,17 @@ use std::io::{self, IoSlice, Write};
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(target_os = "linux")]
-use libc::{stat64};
-
-#[cfg(target_os = "macos")]
-use libc::{stat as stat64};
 use vm_memory::ByteValued;
 
 use super::{
     MetricsHook, Server, ServerUtil, ServerVersion, SrvContext, ZcReader, ZcWriter, DIRENT_PADDING,
-    MAX_BUFFER_SIZE, MAX_REQ_PAGES,
+    MAX_REQ_PAGES,
 };
-use crate::abi::linux_abi::*;
+use crate::abi::kernel_abi::*;
 #[cfg(feature = "virtiofs")]
 use crate::abi::virtio_fs::{RemovemappingIn, RemovemappingOne, SetupmappingIn};
 use crate::api::filesystem::{DirEntry, Entry, FileSystem, GetxattrReply, ListxattrReply};
+use crate::api::server::MAX_BUFFER_SIZE;
 use crate::async_util::AsyncDrive;
 use crate::transport::{FsCacheReqHandler, Reader, Writer};
 use crate::{bytes_to_cstr, encode_io_error_kind, BitmapSlice, Error, Result};
@@ -284,36 +280,23 @@ impl<F: FileSystem + Sync, D: AsyncDrive> Server<F, D> {
     }
 
     pub(super) fn rename<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, D, S>) -> Result<usize> {
-        let RenameIn {
-            newdir,
-            ..
-        } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
+        let RenameIn { newdir, .. } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
 
         self.do_rename(ctx, size_of::<RenameIn>(), newdir, 0)
     }
 
-    #[cfg(target_os = "linux")]
     pub(super) fn rename2<S: BitmapSlice>(
         &self,
         mut ctx: SrvContext<'_, F, D, S>,
     ) -> Result<usize> {
         let Rename2In { newdir, flags, .. } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
 
+        #[cfg(target_os = "linux")]
         let flags =
             flags & (libc::RENAME_EXCHANGE | libc::RENAME_NOREPLACE | libc::RENAME_WHITEOUT) as u32;
 
-        self.do_rename(ctx, size_of::<Rename2In>(), newdir, flags)
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn rename2<S: BitmapSlice>(
-        &self,
-        mut ctx: SrvContext<'_, F, D, S>,
-    ) -> Result<usize> {
-        let Rename2In { newdir, flags, .. } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
-
-        let flags =
-            flags & (libc::RENAME_EXCL | libc::RENAME_SWAP) as u32;
+        #[cfg(target_os = "macos")]
+        let flags = flags & (libc::RENAME_EXCL | libc::RENAME_SWAP) as u32;
 
         self.do_rename(ctx, size_of::<Rename2In>(), newdir, flags)
     }
@@ -1150,10 +1133,7 @@ impl<'a, F: FileSystem, D: AsyncDrive, S: BitmapSlice> SrvContext<'a, F, D, S> {
         self.do_reply_error(err, true)
     }
 
-    fn handle_attr_result(
-        &mut self,
-        result: io::Result<(stat64, Duration)>,
-    ) -> Result<usize> {
+    fn handle_attr_result(&mut self, result: io::Result<(stat64, Duration)>) -> Result<usize> {
         match result {
             Ok((st, timeout)) => {
                 let out = AttrOut {

@@ -12,10 +12,17 @@ use bitflags::bitflags;
 use vm_memory::ByteValued;
 
 #[cfg(target_os = "linux")]
-use libc::{blksize_t, nlink_t, stat64, statvfs64};
+pub use libc::{
+    blksize_t, dev_t, ino64_t, mode_t, nlink_t, off64_t, pread64, preadv64, pwrite64, pwritev64,
+    stat64, stat64, statvfs64,
+};
 
 #[cfg(target_os = "macos")]
-use libc::{blksize_t, nlink_t, stat as stat64, statvfs as statvfs64 };
+pub use libc::{
+    blksize_t, dev_t, ino_t as ino64_t, mode_t, nlink_t, off_t as off64_t, pread as pread64,
+    preadv as preadv64, pwrite as pwrite64, pwritev as pwritev64, stat as stat64,
+    statvfs as statvfs64,
+};
 
 /// Version number of this interface.
 pub const KERNEL_VERSION: u32 = 7;
@@ -553,7 +560,7 @@ pub struct Attr {
     pub mtime: u64,
     pub ctime: u64,
     #[cfg(target_os = "macos")]
-    pub	crtime: u64,
+    pub crtime: u64,
     pub atimensec: u32,
     pub mtimensec: u32,
     pub ctimensec: u32,
@@ -599,8 +606,11 @@ impl Attr {
             rdev: st.st_rdev as u32,
             blksize: st.st_blksize as u32,
             flags: flags as u32,
+            #[cfg(target_os = "macos")]
             crtime: 0,
+            #[cfg(target_os = "macos")]
             crtimensec: 0,
+            #[cfg(target_os = "macos")]
             padding: 0,
         }
     }
@@ -619,11 +629,11 @@ impl From<Attr> for stat64 {
         out.st_atime_nsec = attr.atimensec as i64;
         out.st_mtime_nsec = attr.mtimensec as i64;
         out.st_ctime_nsec = attr.ctimensec as i64;
-        out.st_mode = attr.mode as libc::mode_t;
+        out.st_mode = attr.mode as mode_t;
         out.st_nlink = attr.nlink as nlink_t;
         out.st_uid = attr.uid;
         out.st_gid = attr.gid;
-        out.st_rdev = attr.rdev as libc::dev_t;
+        out.st_rdev = attr.rdev as dev_t;
         out.st_blksize = attr.blksize as blksize_t;
 
         out
@@ -876,7 +886,7 @@ impl From<SetattrIn> for stat64 {
     fn from(setattr: SetattrIn) -> stat64 {
         // Safe because we are zero-initializing a struct with only POD fields.
         let mut out: stat64 = unsafe { mem::zeroed() };
-        out.st_mode = setattr.mode as libc::mode_t;
+        out.st_mode = setattr.mode as mode_t;
         out.st_uid = setattr.uid;
         out.st_gid = setattr.gid;
         out.st_size = setattr.size as i64;
@@ -1002,9 +1012,9 @@ pub struct GetxattrIn {
     pub size: u32,
     pub padding: u32,
     #[cfg(target_os = "macos")]
-    pub	position: u32,
+    pub position: u32,
     #[cfg(target_os = "macos")]
-    pub	padding2: u32,
+    pub padding2: u32,
 }
 unsafe impl ByteValued for GetxattrIn {}
 

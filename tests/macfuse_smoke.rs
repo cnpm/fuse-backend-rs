@@ -3,13 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#[cfg(feature = "macfuse")]
+#[cfg(feature = "fusedev", target_os = "macos")]
 #[macro_use]
 extern crate log;
 
 mod example;
 
-#[cfg(feature = "macfuse")]
+#[cfg(feature = "fusedev", target_os = "macos")]
 mod macfuse_tests {
     extern crate stderrlog;
 
@@ -22,8 +22,7 @@ mod macfuse_tests {
     use crate::example::macfuse;
 
     fn validate_hello_file(dest: &str) -> bool {
-        let files =
-            exec(format!("cd {}; ls -la .;cd - > /dev/null", dest).as_str()).unwrap();
+        let files = exec(format!("cd {}; ls -la .;cd - > /dev/null", dest).as_str()).unwrap();
         if files.find("hello").is_none() {
             error!("files {}:\n not include hello \n", files);
             return false;
@@ -73,11 +72,11 @@ mod macfuse_tests {
         // test the fuse-rs repository
         let tmp_dir = TempDir::new().unwrap();
         let mnt_dir = tmp_dir.as_path().to_str().unwrap();
-        info!("test macfuse mountpoint {}",  mnt_dir);
+        info!("test macfuse mountpoint {}", mnt_dir);
 
         let mut daemon = macfuse::Daemon::new(mnt_dir, 2).unwrap();
         daemon.mount().unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(100));
         assert!(validate_hello_file(mnt_dir));
         daemon.umount().unwrap();
         Ok(())

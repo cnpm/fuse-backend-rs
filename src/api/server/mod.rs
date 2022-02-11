@@ -25,7 +25,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use super::filesystem::{Context, FileSystem, ZeroCopyReader, ZeroCopyWriter};
-use crate::abi::linux_abi::*;
+use crate::abi::kernel_abi::*;
 use crate::async_util::{AsyncDrive, AsyncDriver};
 use crate::transport::{FileReadWriteVolatile, Reader, Writer};
 use crate::{bytes_to_cstr, BitmapSlice, Error, Result};
@@ -34,15 +34,15 @@ use crate::{bytes_to_cstr, BitmapSlice, Error, Result};
 mod async_io;
 mod sync_io;
 
-/// Maximum buffer size of FUSE requests.
-#[cfg(target_os = "linux")]
-const MAX_BUFFER_SIZE: u32 = 1 << 20;
-#[cfg(target_os = "macos")]
-const MAX_BUFFER_SIZE: u32 = 1 << 25;
 const DIRENT_PADDING: [u8; 8] = [0; 8];
 
 /// Maximum number of pages required for FUSE requests.
 pub const MAX_REQ_PAGES: u16 = 256; // 1MB
+/// Maximum buffer size of FUSE requests.
+#[cfg(target_os = "linux")]
+pub const MAX_BUFFER_SIZE: u32 = 1 << 20;
+#[cfg(target_os = "macos")]
+pub const MAX_BUFFER_SIZE: u32 = 1 << 25;
 
 /// Fuse Server to handle requests from the Fuse client and vhost user master.
 pub struct Server<F: FileSystem + Sync, D: AsyncDrive = AsyncDriver> {

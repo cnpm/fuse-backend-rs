@@ -12,15 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-#[cfg(target_os = "linux")]
-use libc::{stat64};
-
-#[cfg(target_os = "macos")]
-use libc::{stat as stat64};
-
-
 use super::{Context, Entry, FileSystem, ZeroCopyReader, ZeroCopyWriter};
-use crate::abi::linux_abi::{OpenOptions, SetattrValid};
+use crate::abi::kernel_abi::{stat64, OpenOptions, SetattrValid};
 use crate::api::CreateIn;
 use crate::async_util::{AsyncDrive, AsyncDriver};
 

@@ -18,18 +18,9 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Result};
 use std::os::unix::io::AsRawFd;
 
-#[cfg(target_os = "linux")]
-use libc::{
-    c_int, c_void, off64_t, pread64, preadv64, pwrite64, pwritev64, read, readv, size_t, write,
-    writev,
-};
-#[cfg(target_os = "macos")]
-use libc::{
-    c_int, c_void, off_t as off64_t, pread as pread64, preadv as preadv64, pwrite as pwrite64, pwritev as pwritev64, read, readv, size_t, write,
-    writev,
-};
-use vm_memory::VolatileSlice;
+use libc::{c_int, c_void, read, readv, size_t, write, writev};
 
+use crate::abi::kernel_abi::{off64_t, pread64, preadv64, pwrite64, pwritev64};
 use crate::transport::FileVolatileSlice;
 
 /// A trait for setting the size of a file.

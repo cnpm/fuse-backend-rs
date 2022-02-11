@@ -29,7 +29,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 
 use super::pseudo_fs::PseudoFs;
-use crate::abi::linux_abi::*;
+use crate::abi::kernel_abi::*;
 use crate::api::filesystem::*;
 use crate::async_util::{AsyncDrive, AsyncDriver};
 
@@ -624,7 +624,7 @@ mod tests {
     #[cfg(feature = "async-io")]
     mod async_io {
         use super::*;
-        use crate::abi::linux_abi::{OpenOptions, SetattrValid};
+        use crate::abi::kernel_abi::{OpenOptions, SetattrValid};
         use async_trait::async_trait;
 
         #[allow(unused_variables)]

@@ -9,6 +9,7 @@
 //!   search is used when searching for child inodes.
 //! - Inodes managed by the PseudoFs is readonly, even for the permission bits.
 
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::{Error, Result};
@@ -17,15 +18,8 @@ use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use arc_swap::ArcSwap;
 
-#[cfg(target_os = "linux")]
-use libc::{stat64};
-
-#[cfg(target_os = "macos")]
-use libc::{stat as stat64};
-
-use crate::abi::linux_abi::Attr;
+use crate::abi::kernel_abi::{stat64, Attr};
 use crate::api::filesystem::*;
 
 // ID 0 is reserved for invalid entry, and ID 1 is used for ROOT_ID.
