@@ -18,3 +18,18 @@ jobs:
       run: make check
     - name: smoke
       run: make docker-smoke
+  Macos-CI:
+    runs-on: macOS-latest
+    steps:
+      - name: Download macfuse
+        run: wget https://github.com/osxfuse/osxfuse/releases/download/macfuse-4.2.4/macfuse-4.2.4.dmg
+      - name: Install macfuse
+        run: >
+          hdiutil attach ./macfuse-4.2.4.dmg && \
+          sudo installer -package /Volumes/macFUSE/Install\ macFUSE.pkg -target / && \
+          hdiutil detach /Volumes/macFUSE
+      - uses: actions/checkout@v2
+      - name: build and check
+        run: make check
+      - name: smoke
+        run: make docker-smoke
