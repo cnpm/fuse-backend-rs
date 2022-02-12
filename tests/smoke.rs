@@ -9,7 +9,7 @@ extern crate log;
 
 mod example;
 
-#[cfg(all(feature = "fusedev", not(feature = "virtiofs")))]
+#[cfg(all(feature = "fusedev", not(feature = "virtiofs"), target_os = "linux"))]
 mod fusedev_tests {
     extern crate stderrlog;
 

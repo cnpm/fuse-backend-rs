@@ -25,10 +25,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 
-use libc::{proc_pidpath, setenv, sysconf, PROC_PIDPATHINFO_MAXSIZE, _SC_PAGESIZE};
+use libc::{c_void, proc_pidpath, setenv, sysconf, PROC_PIDPATHINFO_MAXSIZE, _SC_PAGESIZE};
 use nix::errno::{errno, Errno};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag, F_SETFD};
 use nix::poll::{poll, PollFd, PollFlags};
@@ -55,7 +55,7 @@ mod ioctl {
     use nix::ioctl_write_ptr;
 
     // #define FUSEDEVIOCSETDAEMONDEAD _IOW('F', 3,  u_int32_t)
-    const FUSE_FD_DEAD_MAGIC: u8 = 'F' as u8;
+    const FUSE_FD_DEAD_MAGIC: u8 = b'F';
     const FUSE_FD_DEAD: u8 = 3;
     ioctl_write_ptr!(set_fuse_fd_dead, FUSE_FD_DEAD_MAGIC, FUSE_FD_DEAD, u32);
 }
@@ -68,7 +68,7 @@ pub struct FuseSession {
     file: Option<File>,
     bufsize: usize,
     disk: Arc<Mutex<Option<DADiskRef>>>,
-    dasession: Arc<Mutex<DASessionRef>>,
+    dasession: Arc<AtomicPtr<c_void>>,
     readonly: bool,
 }
 
@@ -96,7 +96,9 @@ impl FuseSession {
             file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
             disk: Arc::new(Mutex::new(None)),
-            dasession: Arc::new(Mutex::new(unsafe { DASessionCreate(std::ptr::null()) })),
+            dasession: Arc::new(AtomicPtr::new(unsafe {
+                DASessionCreate(std::ptr::null()) as *mut c_void
+            })),
             readonly,
         })
     }
@@ -109,9 +111,8 @@ impl FuseSession {
         //     flags |= MsFlags::MS_RDONLY;
         // }
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, self.readonly)?;
-        let session = self.dasession.lock().expect("lock da session failed");
-        let mount_disk = create_disk(&self.mountpoint, *session.deref());
-
+        let session = self.dasession.load(Ordering::SeqCst);
+        let mount_disk = create_disk(&self.mountpoint, session as DASessionRef);
         self.file = Some(file);
         *disk = Some(mount_disk);
 
@@ -259,7 +260,7 @@ fn receive_fd(sock_fd: RawFd) -> Result<RawFd> {
     let mut cmsgspace = cmsg_space!(RawFd);
     let iov = [IoVec::from_mut_slice(&mut buffer)];
     let r = recvmsg(sock_fd, &iov, Some(&mut cmsgspace), MsgFlags::empty()).unwrap();
-    for msg in r.cmsgs() {
+    if let Some(msg) = r.cmsgs().next() {
         match msg {
             ControlMessageOwned::ScmRights(fds) => {
                 let fd = fds
@@ -398,15 +399,13 @@ fn fuse_kern_umount(file: File, disk: Option<DADiskRef>) -> Result<()> {
             CFRelease(std::mem::transmute(disk));
         }
     }
-    return Ok(());
+    Ok(())
 }
 
 fn set_fuse_fd_dead(fd: RawFd) -> std::io::Result<()> {
     unsafe {
         match ioctl::set_fuse_fd_dead(fd, std::mem::transmute(&fd)) {
-            Ok(i) => {
-                return Ok(());
-            }
+            Ok(_) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
@@ -422,21 +421,17 @@ mod tests {
 
     #[test]
     fn test_new_session() {
-        let se = FuseSession::new(Path::new("haha"), "foo", "bar");
+        let se = FuseSession::new(Path::new("haha"), "foo", "bar", true);
         assert!(se.is_err());
 
         let dir = TempDir::new().unwrap();
-        let se = FuseSession::new(dir.as_path(), "foo", "bar");
+        let se = FuseSession::new(dir.as_path(), "foo", "bar", false);
         assert!(se.is_ok());
     }
 
     #[test]
     fn test_new_channel() {
-        let ch = FuseChannel::new(
-            unsafe { File::from_raw_fd(RawFd::new(0).unwrap().as_raw_fd()) },
-            RawFd::new(0).unwrap(),
-            3,
-        );
+        let ch = FuseChannel::new(unsafe { File::from_raw_fd(0) }, 0, 3);
         assert!(ch.is_ok());
     }
 }

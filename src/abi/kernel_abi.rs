@@ -1309,15 +1309,24 @@ mod tests {
 
     #[test]
     fn test_struct_size() {
+        #[cfg(target_os = "linux")]
         assert_eq!(std::mem::size_of::<Attr>(), 88);
+        #[cfg(target_os = "macos")]
+        assert_eq!(std::mem::size_of::<Attr>(), 104);
         assert_eq!(std::mem::size_of::<Kstatfs>(), 80);
         assert_eq!(std::mem::size_of::<FileLock>(), 24);
+        #[cfg(target_os = "linux")]
         assert_eq!(std::mem::size_of::<EntryOut>(), 128);
+        #[cfg(target_os = "macos")]
+        assert_eq!(std::mem::size_of::<EntryOut>(), 144);
         assert_eq!(std::mem::size_of::<ForgetIn>(), 8);
         assert_eq!(std::mem::size_of::<ForgetOne>(), 16);
         assert_eq!(std::mem::size_of::<BatchForgetIn>(), 8);
         assert_eq!(std::mem::size_of::<GetattrIn>(), 16);
+        #[cfg(target_os = "linux")]
         assert_eq!(std::mem::size_of::<AttrOut>(), 104);
+        #[cfg(target_os = "macos")]
+        assert_eq!(std::mem::size_of::<AttrOut>(), 120);
         assert_eq!(std::mem::size_of::<MknodIn>(), 16);
         assert_eq!(std::mem::size_of::<MkdirIn>(), 8);
         assert_eq!(std::mem::size_of::<InHeader>(), 40);

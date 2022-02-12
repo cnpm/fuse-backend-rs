@@ -41,6 +41,7 @@ pub const MAX_REQ_PAGES: u16 = 256; // 1MB
 /// Maximum buffer size of FUSE requests.
 #[cfg(target_os = "linux")]
 pub const MAX_BUFFER_SIZE: u32 = 1 << 20;
+/// Maximum buffer size of FUSE requests.
 #[cfg(target_os = "macos")]
 pub const MAX_BUFFER_SIZE: u32 = 1 << 25;
 
@@ -116,6 +117,7 @@ struct ServerVersion {
 struct ServerUtil();
 
 impl ServerUtil {
+    #[allow(clippy::uninit_vec)]
     fn get_message_body<S: BitmapSlice>(
         r: &mut Reader<'_, S>,
         in_header: &InHeader,

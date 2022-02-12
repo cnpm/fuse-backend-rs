@@ -30,6 +30,6 @@ jobs:
           hdiutil detach /Volumes/macFUSE
       - uses: actions/checkout@v2
       - name: build and check
-        run: make check
+        run: make check-macos
       - name: smoke
-        run: make docker-smoke
+        run: make smoke
