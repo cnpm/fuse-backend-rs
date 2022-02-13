@@ -8,6 +8,7 @@
 
 //! Fuse transport drivers to receive requests from/send reply to Fuse clients.
 
+use libc::{sysconf, _SC_PAGESIZE};
 use std::cmp;
 use std::collections::VecDeque;
 #[cfg(feature = "async-io")]
@@ -18,6 +19,7 @@ use std::io::{self, Read};
 use std::mem::{size_of, MaybeUninit};
 use std::ptr::copy_nonoverlapping;
 
+use lazy_static::lazy_static;
 use vm_memory::{ByteValued, VolatileSlice};
 
 use crate::BitmapSlice;
@@ -404,6 +406,16 @@ impl<S: BitmapSlice> io::Read for Reader<'_, S> {
             Ok(total)
         })
     }
+}
+
+lazy_static! {
+    static ref PAGESIZE: usize = unsafe { sysconf(_SC_PAGESIZE) as usize };
+}
+
+/// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
+#[inline(always)]
+pub fn pagesize() -> usize {
+    *PAGESIZE
 }
 
 #[cfg(test)]

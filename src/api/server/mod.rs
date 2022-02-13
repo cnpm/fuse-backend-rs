@@ -34,16 +34,18 @@ use crate::{bytes_to_cstr, BitmapSlice, Error, Result};
 mod async_io;
 mod sync_io;
 
-const DIRENT_PADDING: [u8; 8] = [0; 8];
-
-/// Maximum number of pages required for FUSE requests.
-pub const MAX_REQ_PAGES: u16 = 256; // 1MB
 /// Maximum buffer size of FUSE requests.
 #[cfg(target_os = "linux")]
 pub const MAX_BUFFER_SIZE: u32 = 1 << 20;
 /// Maximum buffer size of FUSE requests.
 #[cfg(target_os = "macos")]
 pub const MAX_BUFFER_SIZE: u32 = 1 << 25;
+const MIN_READ_BUFFER: u32 = 8192;
+const BUFFER_HEADER_SIZE: u32 = 0x1000;
+const DIRENT_PADDING: [u8; 8] = [0; 8];
+
+/// Maximum number of pages required for FUSE requests.
+pub const MAX_REQ_PAGES: u16 = 256; // 1MB
 
 /// Fuse Server to handle requests from the Fuse client and vhost user master.
 pub struct Server<F: FileSystem + Sync, D: AsyncDrive = AsyncDriver> {
@@ -131,7 +133,10 @@ impl ServerUtil {
         // Allocate buffer without zeroing out the content for performance.
         let mut buf = Vec::<u8>::with_capacity(len);
         // It's safe because read_exact() is called to fill all the allocated buffer.
-        unsafe { buf.set_len(len) };
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            buf.set_len(len)
+        };
         r.read_exact(&mut buf).map_err(Error::DecodeMessage)?;
 
         Ok(buf)
