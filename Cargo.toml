@@ -35,7 +35,7 @@ vhost = { version = "0.3", features = ["vhost-user-slave"], optional = true }
 core-foundation-sys = { version = "0.2.3", optional = true }
 diskarbitration-sys = { version = "0.0.4", optional = true }
 
-[target.'cfg(linux)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 caps = { version = "0.5.1", optional = true }
 
 [dev-dependencies]

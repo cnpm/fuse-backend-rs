@@ -76,7 +76,6 @@ mod macfuse_tests {
 
         let mut daemon = macfuse::Daemon::new(mnt_dir, 2).unwrap();
         daemon.mount().unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(100));
         assert!(validate_hello_file(mnt_dir));
         daemon.umount().unwrap();
         Ok(())

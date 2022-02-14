@@ -325,7 +325,7 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
         #[cfg(target_os = "linux")]
         let res = pwrite(fd, data, 0);
         #[cfg(target_os = "macos")]
-        let res = pwrite(fd, data, 0);
+        let res = write(fd, data);
 
         res.map_err(|e| {
             error! {"fail to write to fuse device fd {}: {}, {:?}", fd, e, data};

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use log::{error, info, warn};
 use std::io::Result;
 use std::path::Path;
 use std::sync::Arc;

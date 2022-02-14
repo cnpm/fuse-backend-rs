@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use libc::time_t;
+use log::{error, info, warn};
 use std::any::Any;
 use std::ffi::CStr;
 use std::io::Result;

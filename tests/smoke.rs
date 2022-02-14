@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-#[cfg(all(feature = "fusedev", not(feature = "virtiofs")))]
+#[cfg(all(feature = "fusedev", not(feature = "virtiofs"), target_os = "linux"))]
 #[macro_use]
 extern crate log;
 

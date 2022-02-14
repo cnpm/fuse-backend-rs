@@ -14,7 +14,7 @@ use vm_memory::ByteValued;
 #[cfg(target_os = "linux")]
 pub use libc::{
     blksize_t, dev_t, ino64_t, mode_t, nlink_t, off64_t, pread64, preadv64, pwrite64, pwritev64,
-    stat64, stat64, statvfs64,
+    stat64, statvfs64,
 };
 
 #[cfg(target_os = "macos")]
