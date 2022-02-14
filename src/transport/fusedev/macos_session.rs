@@ -41,6 +41,7 @@ use nix::unistd::{close, execv, fork, getgid, getpid, getuid, read, ForkResult};
 use nix::{cmsg_space, NixPath};
 
 use super::{Error::SessionFailure, FuseBuf, Reader, Result, Writer};
+use crate::transport::pagesize;
 
 // These follows definition from libfuse.
 const FUSE_KERN_BUF_SIZE: usize = 256;
@@ -245,13 +246,6 @@ impl FuseChannel {
             }
         }
     }
-}
-
-/// Safe wrapper for `sysconf(_SC_PAGESIZE)`.
-#[inline(always)]
-fn pagesize() -> usize {
-    // Trivially safe
-    unsafe { sysconf(_SC_PAGESIZE) as usize }
 }
 
 /// Mount a fuse file system
