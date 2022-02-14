@@ -12,7 +12,7 @@ use std::convert::TryInto;
 use std::io;
 use std::time::Duration;
 
-use crate::abi::kernel_abi as fuse;
+use crate::abi::fuse_abi as fuse;
 use crate::transport::FileReadWriteVolatile;
 
 pub use fuse::FsOptions;
@@ -20,7 +20,7 @@ pub use fuse::OpenOptions;
 pub use fuse::SetattrValid;
 pub use fuse::ROOT_ID;
 
-use crate::abi::kernel_abi::{ino64_t, stat64};
+use crate::abi::fuse_abi::{ino64_t, stat64};
 
 #[cfg(feature = "async-io")]
 mod async_io;
@@ -441,7 +441,7 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::kernel_abi::Attr;
+    use crate::abi::fuse_abi::Attr;
 
     #[test]
     fn test_from_fuse_header() {

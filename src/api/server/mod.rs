@@ -25,7 +25,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use super::filesystem::{Context, FileSystem, ZeroCopyReader, ZeroCopyWriter};
-use crate::abi::kernel_abi::*;
+use crate::abi::fuse_abi::*;
 use crate::async_util::{AsyncDrive, AsyncDriver};
 use crate::transport::{FileReadWriteVolatile, Reader, Writer};
 use crate::{bytes_to_cstr, BitmapSlice, Error, Result};

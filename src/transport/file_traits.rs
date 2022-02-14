@@ -20,7 +20,7 @@ use std::os::unix::io::AsRawFd;
 
 use libc::{c_int, c_void, read, readv, size_t, write, writev};
 
-use crate::abi::kernel_abi::{off64_t, pread64, preadv64, pwrite64, pwritev64};
+use crate::abi::fuse_abi::{off64_t, pread64, preadv64, pwrite64, pwritev64};
 use crate::transport::FileVolatileSlice;
 
 /// A trait for setting the size of a file.

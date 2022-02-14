@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use fuse_backend_rs::abi::kernel_abi::Attr;
+use fuse_backend_rs::abi::fuse_abi::Attr;
 
 use fuse_backend_rs::api::filesystem::{Context, DirEntry, Entry, FileSystem, ZeroCopyWriter};
 use fuse_backend_rs::api::{server::Server, BackendFileSystem, Vfs, VfsOptions};

@@ -13,7 +13,7 @@ use super::{
     MetricsHook, Server, ServerUtil, ServerVersion, SrvContext, ZcReader, ZcWriter,
     BUFFER_HEADER_SIZE, DIRENT_PADDING, MAX_BUFFER_SIZE, MAX_REQ_PAGES, MIN_READ_BUFFER,
 };
-use crate::abi::kernel_abi::*;
+use crate::abi::fuse_abi::*;
 #[cfg(feature = "virtiofs")]
 use crate::abi::virtio_fs::{RemovemappingIn, RemovemappingOne, SetupmappingIn};
 use crate::api::filesystem::{

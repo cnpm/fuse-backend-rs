@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use vm_memory::ByteValued;
 
 use super::{MetricsHook, Server, ServerUtil, SrvContext};
-use crate::abi::kernel_abi::*;
+use crate::abi::fuse_abi::*;
 use crate::api::filesystem::{
     AsyncFileSystem, AsyncZeroCopyReader, AsyncZeroCopyWriter, ZeroCopyReader, ZeroCopyWriter,
 };

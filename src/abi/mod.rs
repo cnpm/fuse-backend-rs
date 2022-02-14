@@ -5,7 +5,7 @@
 
 /// Linux/Macos Fuse Application Binary Interfaces.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub mod kernel_abi;
+pub mod fuse_abi;
 
 #[cfg(feature = "virtiofs")]
 pub mod virtio_fs;

@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use super::{Context, Entry, FileSystem, ZeroCopyReader, ZeroCopyWriter};
-use crate::abi::kernel_abi::{stat64, OpenOptions, SetattrValid};
+use crate::abi::fuse_abi::{stat64, OpenOptions, SetattrValid};
 use crate::api::CreateIn;
 use crate::async_util::{AsyncDrive, AsyncDriver};
 

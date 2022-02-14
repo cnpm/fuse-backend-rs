@@ -7,7 +7,7 @@ use super::{
     Context, DirEntry, Entry, FileLock, GetxattrReply, IoctlData, ListxattrReply, ZeroCopyReader,
     ZeroCopyWriter,
 };
-use crate::abi::kernel_abi::{stat64, statvfs64, CreateIn, FsOptions, OpenOptions, SetattrValid};
+use crate::abi::fuse_abi::{stat64, statvfs64, CreateIn, FsOptions, OpenOptions, SetattrValid};
 #[cfg(feature = "virtiofs")]
 pub use crate::abi::virtio_fs::RemovemappingOne;
 #[cfg(feature = "virtiofs")]
