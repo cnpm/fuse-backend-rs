@@ -20,6 +20,7 @@ use std::ffi::CString;
 use std::fmt::format;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
+use std::num::NonZeroU8;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -27,8 +28,11 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use libc::{c_void, proc_pidpath, setenv, sysconf, PROC_PIDPATHINFO_MAXSIZE, _SC_PAGESIZE};
+use mio::{Events, Interest, Poll, Waker};
+use mio::unix::{SourceFd};
 use nix::errno::{errno, Errno};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag, F_SETFD};
 use nix::poll::{poll, PollFd, PollFlags};
@@ -40,7 +44,7 @@ use nix::sys::uio::IoVec;
 use nix::unistd::{close, execv, fork, getgid, getpid, getuid, read, ForkResult};
 use nix::{cmsg_space, NixPath};
 
-use super::{Error::SessionFailure, FuseBuf, Reader, Result, Writer};
+use super::{Error::SessionFailure, FuseBuf, Reader, Result, Writer, EXIT_TOKEN, CHANNEL_FD_TOKEN};
 use crate::transport::pagesize;
 
 // These follows definition from libfuse.
@@ -71,6 +75,7 @@ pub struct FuseSession {
     disk: Arc<Mutex<Option<DADiskRef>>>,
     dasession: Arc<AtomicPtr<c_void>>,
     readonly: bool,
+    channel_wakers: Mutex<Vec<Arc<Waker>>>,
 }
 
 unsafe impl Send for FuseSession {}
@@ -89,13 +94,13 @@ impl FuseSession {
         if !dest.is_dir() {
             return Err(SessionFailure(format!("{:?} is not a directory", dest)));
         }
-
         Ok(FuseSession {
             mountpoint: dest,
             fsname: fsname.to_owned(),
             subtype: subtype.to_owned(),
             file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
+            channel_wakers: Mutex::new(Vec::new()),
             disk: Arc::new(Mutex::new(None)),
             dasession: Arc::new(AtomicPtr::new(unsafe {
                 DASessionCreate(std::ptr::null()) as *mut c_void
@@ -165,16 +170,56 @@ impl FuseSession {
     }
 
     /// Create a new fuse message channel.
-    pub fn new_channel(&self, fuse_session_end: RawFd) -> Result<FuseChannel> {
+    pub fn new_channel(&self) -> Result<FuseChannel> {
         if let Some(file) = &self.file {
             let file = file
                 .try_clone()
                 .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
-            FuseChannel::new(file, fuse_session_end, self.bufsize)
+            let channel = FuseChannel::new(file, self.bufsize)?;
+            let waker = channel.get_waker();
+            let mut channel_wakers = self.channel_wakers.lock()
+                .map_err(|e| SessionFailure(format!("lock channel wakers failed")))?;
+            channel_wakers.push(waker);
+            Ok(channel)
         } else {
             Err(SessionFailure("invalid fuse session".to_string()))
         }
     }
+
+    /// interrupt fuse session
+    pub fn interrupt(&self) -> Result<()> {
+        let channel_wakers = self.channel_wakers.lock()
+            .map_err(|e| SessionFailure(format!("lock channel wakers failed {:?}", e)))?;
+        for channel_waker in channel_wakers.iter() {
+            channel_waker.wake()
+                .map_err(|e| SessionFailure(format!("wake channel failed {:?}", e)))?;
+        }
+        Ok(())
+    }
+}
+
+macro_rules! kevent {
+    ($id: expr, $filter: expr, $flags: expr, $data: expr) => {
+        libc::kevent {
+            ident: $id as libc::uintptr_t,
+            filter: $filter as i16,
+            flags: $flags,
+            fflags: 0,
+            data: 0,
+            udata: $data as *mut libc::c_void,
+        }
+    };
+}
+
+macro_rules! syscall {
+    ($fn: ident ( $($arg: expr),* $(,)* ) ) => {{
+        let res = unsafe { libc::$fn($($arg, )*) };
+        if res == -1 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(res)
+        }
+    }};
 }
 
 impl Drop for FuseSession {
@@ -186,17 +231,100 @@ impl Drop for FuseSession {
 /// A fuse channel abstruction. Each session can hold multiple channels.
 pub struct FuseChannel {
     file: File,
-    pipe_fd: RawFd,
+    poll: Poll,
+    waker: Arc<Waker>,
     buf: Vec<u8>,
 }
 
+fn kevent_register(
+    kq: RawFd,
+    changes: &mut [libc::kevent],
+    ignored_errors: &[libc::intptr_t],
+) -> std::io::Result<()> {
+    syscall!(kevent(
+        kq,
+        changes.as_ptr(),
+        changes.len() as libc::c_int,
+        changes.as_mut_ptr(),
+        changes.len() as libc::c_int,
+        std::ptr::null(),
+    ))
+        .map(|_| ())
+        .or_else(|err| {
+            // According to the manual page of FreeBSD: "When kevent() call fails
+            // with EINTR error, all changes in the changelist have been applied",
+            // so we can safely ignore it.
+            println!("sys call failed {:?}", err);
+            if err.raw_os_error() == Some(libc::EINTR) {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })
+        .and_then(|()| check_errors(changes, ignored_errors))
+}
+
+fn check_errors(events: &[libc::kevent], ignored_errors: &[libc::intptr_t]) -> std::io::Result<()> {
+    for event in events {
+        // We can't use references to packed structures (in checking the ignored
+        // errors), so we need copy the data out before use.
+        let data = event.data;
+        // Check for the error flag, the actual error will be in the `data`
+        // field.
+        if (event.flags & libc::EV_ERROR != 0) && data != 0 && !ignored_errors.contains(&data) {
+            println!("event failed!");
+            return Err(std::io::Error::from_raw_os_error(data as i32));
+        }
+    }
+    Ok(())
+}
+
 impl FuseChannel {
-    fn new(file: File, pipe_fd: RawFd, bufsize: usize) -> Result<Self> {
+    fn new(mut file: File, bufsize: usize) -> Result<Self> {
+        let poll = Poll::new().map_err(|e| {
+            SessionFailure(format!("create channel poll failed {:?}", e))
+        })?;
+        let waker = Waker::new(poll.registry(), EXIT_TOKEN).map_err(|e| {
+            SessionFailure(format!("create channel poll waker failed {:?}", e))
+        })?;
+
+        println!("file:{:?} ", file);
+        println!("file meta:{:?} ", file.metadata());
+        // fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)); // .map_err(|e| SessionFailure(format!("fcntl nonblock {:?}", e)))?
+        // poll.registry().register(&mut SourceFd(& file.as_raw_fd()), CHANNEL_FD_TOKEN, Interest::READABLE)
+        //     .map_err(|e| {
+        //         SessionFailure(format!("register channel fd failed {:?}", e))
+        //     })?;;
+
+        // poll.as_raw_fd()
+        let flags = libc::EV_CLEAR | libc::EV_RECEIPT | libc::EV_ADD | libc::EV_ENABLE | libc::EV_EOF | libc::EV_ERROR;
+        let event = kevent!(file.as_raw_fd(), libc::EVFILT_READ, flags, 1);
+        let mut changes = vec![
+            event,
+        ];
+        kevent_register(poll.as_raw_fd(), &mut changes, &[
+            libc::EPIPE as libc::intptr_t,
+            libc::ENOENT as libc::intptr_t,
+        ])
+            .map_err(|e| {
+                SessionFailure(format!("register channel fd failed {:?}", e))
+            })?;;
+
+        //
+        //
+        // poll.registry().register(&mut SourceFd(&file.as_raw_fd()), CHANNEL_FD_TOKEN, Interest::READABLE)
+        //
         Ok(FuseChannel {
             file,
-            pipe_fd,
+            poll,
+            waker: Arc::new(waker),
             buf: vec![0x0u8; bufsize],
         })
+    }
+
+    /// Get waker for exit channel
+    pub fn get_waker(&self) -> Arc<Waker> {
+        self.waker.clone()
     }
 
     /// Get next available FUSE request from the underlying fuse device file.
@@ -206,43 +334,67 @@ impl FuseChannel {
     /// - Ok(Some((reader, writer))): reader to receive request and writer to send reply
     /// - Err(e): error message
     pub fn get_request(&mut self) -> Result<Option<(Reader, Writer)>> {
+        trace!("star get request");
         let fd = self.file.as_raw_fd();
+        let mut events = Events::with_capacity(8);
         loop {
-            match read(fd, &mut self.buf) {
-                Ok(len) => {
-                    // ###############################################
-                    // Note: it's a heavy hack to reuse the same underlying data
-                    // buffer for both Reader and Writer, in order to reduce memory
-                    // consumption. Here we assume Reader won't be used anymore once
-                    // we start to write to the Writer. To get rid of this hack,
-                    // just allocate a dedicated data buffer for Writer.
-                    let buf = unsafe {
-                        std::slice::from_raw_parts_mut(self.buf.as_mut_ptr(), self.buf.len())
-                    };
-                    // Reader::new() and Writer::new() should always return success.
-                    let reader = Reader::new(FuseBuf::new(&mut self.buf[..len])).unwrap();
-                    let writer = Writer::new(fd, buf).unwrap();
-                    return Ok(Some((reader, writer)));
-                }
-                Err(e) => match e {
-                    Errno::ENOENT => {
-                        // ENOENT means the operation was interrupted, it's safe
-                        // to restart
-                        trace!("restart reading");
-                        continue;
-                    }
-                    Errno::EAGAIN | Errno::EINTR => {
-                        continue;
-                    }
-                    Errno::ENODEV => {
-                        info!("fuse filesystem umounted");
+            trace!("start wait events");
+            self.poll.poll(&mut events, Some(Duration::from_secs(1)))
+                .map_err(|e| SessionFailure(format!("poll error: {}", e)))?;
+            trace!("events: {:?}", &events);
+            for event in &events {
+                match event.token() {
+                    EXIT_TOKEN => {
+                        // Directly returning from here is reliable as we handle only one
+                        // epoll event which is `Read` or `Exit`.
+                        // One more trick, we don't read the event fd so as to make all
+                        // fuse threads exit. It relies on a LEVEL triggered event fd.
+                        info!("Will exit from fuse service");
                         return Ok(None);
                     }
-                    e => {
-                        warn! {"read fuse dev failed on fd {}: {}", fd, e};
-                        return Err(SessionFailure(format!("read new request: {:?}", e)));
+                    CHANNEL_FD_TOKEN => {
+                        match read(fd, &mut self.buf) {
+                            Ok(len) => {
+                                // ###############################################
+                                // Note: it's a heavy hack to reuse the same underlying data
+                                // buffer for both Reader and Writer, in order to reduce memory
+                                // consumption. Here we assume Reader won't be used anymore once
+                                // we start to write to the Writer. To get rid of this hack,
+                                // just allocate a dedicated data buffer for Writer.
+                                let buf = unsafe {
+                                    std::slice::from_raw_parts_mut(self.buf.as_mut_ptr(), self.buf.len())
+                                };
+                                // Reader::new() and Writer::new() should always return success.
+                                let reader = Reader::new(FuseBuf::new(&mut self.buf[..len])).unwrap();
+                                let writer = Writer::new(fd, buf).unwrap();
+                                return Ok(Some((reader, writer)));
+                            }
+                            Err(e) => match e {
+                                Errno::ENOENT => {
+                                    // ENOENT means the operation was interrupted, it's safe
+                                    // to restart
+                                    trace!("restart reading");
+                                    continue;
+                                }
+                                Errno::EAGAIN | Errno::EINTR => {
+                                    continue;
+                                }
+                                Errno::ENODEV => {
+                                    info!("fuse filesystem umounted");
+                                    return Ok(None);
+                                }
+                                e => {
+                                    warn! {"read fuse dev failed on fd {}: {}", fd, e};
+                                    return Err(SessionFailure(format!("read new request: {:?}", e)));
+                                }
+                            },
+                        }
+                    },
+                    x => {
+                        error!("unexpected epoll event");
+                        return Err(SessionFailure(format!("unexpected epoll event: {}", x.0)));
                     }
-                },
+                }
             }
         }
     }
@@ -408,7 +560,7 @@ fn set_fuse_fd_dead(fd: RawFd) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::os::unix::io::{FromRawFd, RawFd};
     use std::path::Path;
     use vmm_sys_util::tempdir::TempDir;
@@ -425,7 +577,14 @@ mod tests {
 
     #[test]
     fn test_new_channel() {
-        let ch = FuseChannel::new(unsafe { File::from_raw_fd(0) }, 0, 3);
+        let file = OpenOptions::new()
+            .read(true)
+            .open("/dev/random")
+            .expect("open file failed");
+        let ch = FuseChannel::new(file, 3);
+        if let Err(e) = &ch {
+            println!("ch: {:?}", e);
+        }
         assert!(ch.is_ok());
     }
 }

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
+use mio::Waker;
 
 use fuse_backend_rs::abi::fuse_abi::Attr;
 
@@ -252,8 +253,6 @@ pub struct Daemon {
     mountpoint: String,
     server: Arc<Server<Arc<Vfs<AsyncDriver>>>>,
     thread_cnt: u32,
-    exit_fd: RawFd,
-    wait_exit_fd: RawFd,
     session: Option<FuseSession>,
 }
 
@@ -275,8 +274,6 @@ impl Daemon {
             mountpoint: mountpoint.to_string(),
             server: Arc::new(Server::new(Arc::new(vfs))),
             thread_cnt,
-            exit_fd: sx,
-            wait_exit_fd: rx,
             session: None,
         })
     }
@@ -290,7 +287,7 @@ impl Daemon {
         for _ in 0..self.thread_cnt {
             let mut server = FuseServer {
                 server: self.server.clone(),
-                ch: se.new_channel(self.wait_exit_fd).unwrap(),
+                ch: se.new_channel().unwrap(),
             };
             let _thread = thread::Builder::new()
                 .name("fuse_server".to_string())
@@ -308,9 +305,9 @@ impl Daemon {
     /// Umounts and destroies a fusedev daemon
     pub fn umount(&mut self) -> Result<()> {
         if let Some(mut se) = self.session.take() {
+            se.interrupt().unwrap();
             se.umount().unwrap();
         }
-        nix::unistd::write(self.exit_fd, &[1])?;
         Ok(())
     }
 }

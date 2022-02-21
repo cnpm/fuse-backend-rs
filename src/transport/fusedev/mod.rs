@@ -10,6 +10,7 @@ use std::io::{self, IoSlice, Write};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::os::unix::io::RawFd;
+use mio::Token;
 
 use nix::sys::uio::{pwrite, writev, IoVec};
 use nix::unistd::write;
@@ -17,6 +18,9 @@ use vm_memory::{ByteValued, VolatileMemory, VolatileMemoryError, VolatileSlice};
 
 use super::{FileReadWriteVolatile, FileVolatileSlice, IoBuffers, Reader};
 use crate::BitmapSlice;
+
+pub(crate) const EXIT_TOKEN: Token = Token(0);
+pub(crate) const CHANNEL_FD_TOKEN: Token = Token(1);
 
 #[cfg(target_os = "linux")]
 mod linux_session;
