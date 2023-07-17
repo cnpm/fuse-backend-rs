@@ -53,7 +53,7 @@ mod macfuse_tests {
     }
 
     #[test]
-    #[ignore] // it depends on privileged mode to pass through /dev/fuse
+    #[cfg(feature = "fuse-t")] // it depends on privileged mode to pass through /dev/fuse
     fn integration_test_macfuse_hello() -> Result<()> {
         // test the fuse-rs repository
         let tmp_dir = TempDir::new().unwrap();

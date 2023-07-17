@@ -8,28 +8,53 @@
 //! sequentially. A FUSE session is a connection from a FUSE mountpoint to a FUSE server daemon.
 //! A FUSE session can have multiple FUSE channels so that FUSE requests are handled in parallel.
 
+#[cfg(not(feature = "fuse-t"))]
 use core_foundation_sys::base::{CFAllocatorRef, CFIndex, CFRelease};
+#[cfg(not(feature = "fuse-t"))]
 use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringCreateWithBytes};
+#[cfg(not(feature = "fuse-t"))]
 use core_foundation_sys::url::{kCFURLPOSIXPathStyle, CFURLCreateWithFileSystemPath, CFURLRef};
+#[cfg(not(feature = "fuse-t"))]
 use std::ffi::CString;
 use std::fs::File;
+#[cfg(not(feature = "fuse-t"))]
 use std::io::IoSliceMut;
+#[cfg(feature = "fuse-t")]
+use std::mem::size_of;
+#[cfg(not(feature = "fuse-t"))]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+#[cfg(feature = "fuse-t")]
+use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "fuse-t")]
+use std::process::Command;
+#[cfg(not(feature = "fuse-t"))]
 use std::sync::atomic::{AtomicPtr, Ordering};
+#[cfg(not(feature = "fuse-t"))]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "fuse-t")]
+use std::thread::JoinHandle;
 
-use libc::{c_void, proc_pidpath, PROC_PIDPATHINFO_MAXSIZE};
+#[cfg(not(feature = "fuse-t"))]
+use libc::c_void;
+use libc::{proc_pidpath, PROC_PIDPATHINFO_MAXSIZE};
 use nix::errno::Errno;
+#[cfg(not(feature = "fuse-t"))]
 use nix::fcntl::{fcntl, FdFlag, F_SETFD};
 use nix::sys::signal::{signal, SigHandler, Signal};
-use nix::sys::socket::{
-    recvmsg, socketpair, AddressFamily, ControlMessageOwned, MsgFlags, RecvMsg, SockFlag, SockType,
-    UnixAddr,
-};
-use nix::unistd::{close, execv, fork, getpid, read, ForkResult};
+#[cfg(feature = "fuse-t")]
+use nix::sys::socket::{recv, send, setsockopt, SetSockOpt};
+#[cfg(not(feature = "fuse-t"))]
+use nix::sys::socket::{recvmsg, ControlMessageOwned, RecvMsg, UnixAddr};
+use nix::sys::socket::{socketpair, AddressFamily, MsgFlags, SockFlag, SockType};
+#[cfg(not(feature = "fuse-t"))]
+use nix::unistd::execv;
+use nix::unistd::{close, fork, getpid, read, ForkResult};
+#[cfg(not(feature = "fuse-t"))]
 use nix::{cmsg_space, NixPath};
+#[cfg(feature = "fuse-t")]
+use vm_memory::ByteValued;
 
 use super::{Error::IoError, Error::SessionFailure, FuseBuf, FuseDevWriter, Reader, Result};
 use crate::transport::pagesize;
@@ -37,25 +62,39 @@ use crate::transport::pagesize;
 // These follows definition from libfuse.
 const FUSE_KERN_BUF_SIZE: usize = 256;
 const FUSE_HEADER_SIZE: usize = 0x1000;
+#[cfg(feature = "fuse-t")]
+const FS_SND_SIZE: usize = 4 * 1024 * 1024;
 
+#[cfg(not(feature = "fuse-t"))]
 const OSXFUSE_MOUNT_PROG: &str = "/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse";
+#[cfg(feature = "fuse-t")]
+const FUSE_NFSSRV_PATH: &str = "/usr/local/bin/go-nfsv4";
 
+#[cfg(not(feature = "fuse-t"))]
 static K_DADISK_UNMOUNT_OPTION_FORCE: u64 = 524288;
 
 #[repr(C)]
+#[cfg(not(feature = "fuse-t"))]
 struct __DADisk(c_void);
+#[cfg(not(feature = "fuse-t"))]
 type DADiskRef = *const __DADisk;
 #[repr(C)]
+#[cfg(not(feature = "fuse-t"))]
 struct __DADissenter(c_void);
+#[cfg(not(feature = "fuse-t"))]
 type DADissenterRef = *const __DADissenter;
 #[repr(C)]
+#[cfg(not(feature = "fuse-t"))]
 struct __DASession(c_void);
+#[cfg(not(feature = "fuse-t"))]
 type DASessionRef = *const __DASession;
 
+#[cfg(not(feature = "fuse-t"))]
 type DADiskUnmountCallback = ::std::option::Option<
     unsafe extern "C" fn(disk: DADiskRef, dissenter: DADissenterRef, context: *mut c_void),
 >;
 
+#[cfg(not(feature = "fuse-t"))]
 extern "C" {
     fn DADiskUnmount(
         disk: DADiskRef,
@@ -71,6 +110,7 @@ extern "C" {
     fn DASessionCreate(allocator: CFAllocatorRef) -> DASessionRef;
 }
 
+#[cfg(not(feature = "fuse-t"))]
 mod ioctl {
     use nix::ioctl_write_ptr;
 
@@ -80,6 +120,50 @@ mod ioctl {
     ioctl_write_ptr!(set_fuse_fd_dead, FUSE_FD_DEAD_MAGIC, FUSE_FD_DEAD, u32);
 }
 
+#[cfg(feature = "fuse-t")]
+#[derive(Clone, Debug)]
+pub struct RcvBuf;
+
+#[cfg(feature = "fuse-t")]
+impl SetSockOpt for RcvBuf {
+    type Val = usize;
+
+    fn set(&self, fd: RawFd, val: &Self::Val) -> nix::Result<()> {
+        unsafe {
+            let res = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                val.as_slice().as_ptr() as *const _,
+                size_of::<usize>() as libc::socklen_t,
+            );
+            Errno::result(res).map(drop)
+        }
+    }
+}
+
+#[cfg(feature = "fuse-t")]
+#[derive(Clone, Debug)]
+pub struct SndBuf;
+
+#[cfg(feature = "fuse-t")]
+impl SetSockOpt for SndBuf {
+    type Val = usize;
+
+    fn set(&self, fd: RawFd, val: &Self::Val) -> nix::Result<()> {
+        unsafe {
+            let res = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                val.as_slice().as_ptr() as *const _,
+                size_of::<usize>() as libc::socklen_t,
+            );
+            Errno::result(res).map(drop)
+        }
+    }
+}
+
 /// A fuse session manager to manage the connection with the in kernel fuse driver.
 pub struct FuseSession {
     mountpoint: PathBuf,
@@ -87,9 +171,16 @@ pub struct FuseSession {
     subtype: String,
     file: Option<File>,
     bufsize: usize,
+    #[cfg(not(feature = "fuse-t"))]
     disk: Arc<Mutex<Option<DADiskRef>>>,
+    #[cfg(not(feature = "fuse-t"))]
     dasession: Arc<AtomicPtr<c_void>>,
     readonly: bool,
+
+    #[cfg(feature = "fuse-t")]
+    monitor_file: Option<File>,
+    #[cfg(feature = "fuse-t")]
+    wait_handle: Option<JoinHandle<Result<()>>>,
 }
 
 unsafe impl Send for FuseSession {}
@@ -115,15 +206,22 @@ impl FuseSession {
             subtype: subtype.to_owned(),
             file: None,
             bufsize: FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_SIZE,
+            #[cfg(not(feature = "fuse-t"))]
             disk: Arc::new(Mutex::new(None)),
+            #[cfg(not(feature = "fuse-t"))]
             dasession: Arc::new(AtomicPtr::new(unsafe {
                 DASessionCreate(std::ptr::null()) as *mut c_void
             })),
+            #[cfg(feature = "fuse-t")]
+            monitor_file: None,
+            #[cfg(feature = "fuse-t")]
+            wait_handle: None,
             readonly,
         })
     }
 
     /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
+    #[cfg(not(feature = "fuse-t"))]
     pub fn mount(&mut self) -> Result<()> {
         let mut disk = self.disk.lock().expect("lock disk failed");
         let file = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, self.readonly)?;
@@ -131,6 +229,17 @@ impl FuseSession {
         let mount_disk = create_disk(&self.mountpoint, session as DASessionRef);
         self.file = Some(file);
         *disk = Some(mount_disk);
+
+        Ok(())
+    }
+
+    /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
+    #[cfg(feature = "fuse-t")]
+    pub fn mount(&mut self) -> Result<()> {
+        let files = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, self.readonly)?;
+        self.file = Some(files.0);
+        self.monitor_file = Some(files.1);
+        self.wait_handle = Some(self.send_mount_command()?);
 
         Ok(())
     }
@@ -146,11 +255,26 @@ impl FuseSession {
     }
 
     /// Destroy a fuse session.
+    #[cfg(not(feature = "fuse-t"))]
     pub fn umount(&mut self) -> Result<()> {
         if let Some(file) = self.file.take() {
             if self.mountpoint.to_str().is_some() {
                 let mut disk = self.disk.lock().expect("lock disk failed");
                 fuse_kern_umount(file, disk.take())
+            } else {
+                Err(SessionFailure("invalid mountpoint".to_string()))
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Destroy a fuse session.
+    #[cfg(feature = "fuse-t")]
+    pub fn umount(&mut self) -> Result<()> {
+        if let Some(file) = self.monitor_file.take() {
+            if self.mountpoint.to_str().is_some() {
+                fuse_kern_umount(file)
             } else {
                 Err(SessionFailure("invalid mountpoint".to_string()))
             }
@@ -196,6 +320,56 @@ impl FuseSession {
     /// So wakers is no need for macfuse to interrupt channel
     pub fn wake(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// wait for fuse-t handle mount command
+    #[cfg(feature = "fuse-t")]
+    pub fn wait_mount(&mut self) -> Result<()> {
+        if let Some(wait_handle) = self.wait_handle.take() {
+            let _ = wait_handle.join()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "fuse-t")]
+    fn send_mount_command(&self) -> Result<JoinHandle<Result<()>>> {
+        let mon_fd = self
+            .monitor_file
+            .as_ref()
+            .ok_or(SessionFailure("monitor fd is not ready".to_string()))
+            .map(|f| f.as_raw_fd())?;
+
+        let handle = std::thread::spawn(move || {
+            let msg = b"mount";
+            if let Err(e) = send(mon_fd, msg, MsgFlags::empty()) {
+                return Err(SessionFailure(format!("send mount failed {:?}", e)));
+            };
+
+            loop {
+                let mut status = -1;
+                let res = recv(mon_fd, status.as_mut_slice(), MsgFlags::empty());
+                match res {
+                    Ok(_) => {
+                        trace!("get monitor fd response status: {:?}", status);
+                        if status == 0 {
+                            return Ok(());
+                        } else {
+                            return Err(SessionFailure(format!(
+                                "mount failed status: {:?}",
+                                status
+                            )));
+                        }
+                    }
+                    Err(Errno::EINTR) | Err(Errno::EBADF) => {
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(SessionFailure(format!("read mount status failed {:?}", e)));
+                    }
+                }
+            }
+        });
+        Ok(handle)
     }
 }
 
@@ -274,6 +448,7 @@ impl FuseChannel {
 }
 
 /// Mount a fuse file system
+#[cfg(not(feature = "fuse-t"))]
 fn receive_fd(sock_fd: RawFd) -> Result<RawFd> {
     let mut buffer = vec![0u8; 4];
     let mut cmsgspace = cmsg_space!(RawFd);
@@ -296,6 +471,7 @@ fn receive_fd(sock_fd: RawFd) -> Result<RawFd> {
     Err(SessionFailure(String::from("not get fd")))
 }
 
+#[cfg(not(feature = "fuse-t"))]
 fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str, rd_only: bool) -> Result<File> {
     unsafe { signal(Signal::SIGCHLD, SigHandler::SigDfl) }
         .map_err(|e| SessionFailure(format!("fail to reset SIGCHLD handler{:?}", e)))?;
@@ -382,6 +558,7 @@ fn fuse_kern_mount(mountpoint: &Path, fsname: &str, subtype: &str, rd_only: bool
     Ok(file)
 }
 
+#[cfg(not(feature = "fuse-t"))]
 fn create_disk(mountpoint: &Path, dasession: DASessionRef) -> DADiskRef {
     unsafe {
         let path_len = mountpoint.len();
@@ -404,6 +581,7 @@ fn create_disk(mountpoint: &Path, dasession: DASessionRef) -> DADiskRef {
 }
 
 /// Umount a fuse file system
+#[cfg(not(feature = "fuse-t"))]
 fn fuse_kern_umount(file: File, disk: Option<DADiskRef>) -> Result<()> {
     if let Err(e) = set_fuse_fd_dead(file.as_raw_fd()) {
         return Err(SessionFailure(format!(
@@ -427,6 +605,7 @@ fn fuse_kern_umount(file: File, disk: Option<DADiskRef>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "fuse-t"))]
 fn set_fuse_fd_dead(fd: RawFd) -> std::io::Result<()> {
     unsafe {
         match ioctl::set_fuse_fd_dead(fd, &fd as *const i32 as *const u32) {
@@ -434,6 +613,106 @@ fn set_fuse_fd_dead(fd: RawFd) -> std::io::Result<()> {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+#[cfg(feature = "fuse-t")]
+fn fuse_kern_mount(
+    mountpoint: &Path,
+    fsname: &str,
+    subtype: &str,
+    rd_only: bool,
+) -> Result<(File, File)> {
+    unsafe { signal(Signal::SIGCHLD, SigHandler::SigDfl) }
+        .map_err(|e| SessionFailure(format!("fail to reset SIGCHLD handler{:?}", e)))?;
+
+    let (fd0, fd1) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::empty(),
+    )
+    .map_err(|e| SessionFailure(format!("create socket failed {:?}", e)))?;
+
+    setsockopt(fd0, SndBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd0 socket snd size {:?}", e)))?;
+    setsockopt(fd0, RcvBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd0 socket rcv size {:?}", e)))?;
+    setsockopt(fd1, SndBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd1 socket snd size {:?}", e)))?;
+    setsockopt(fd1, RcvBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd1 socket rcv size {:?}", e)))?;
+
+    let (mon_fd0, mon_fd1) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::empty(),
+    )
+    .map_err(|e| SessionFailure(format!("create mon socket failed {:?}", e)))?;
+
+    let res;
+    unsafe {
+        res = fork().map_err(|e| SessionFailure(format!("fork mount_macfuse failed {:?}", e)))?;
+    }
+
+    match res {
+        ForkResult::Parent { .. } => {
+            close(fd0).map_err(|e| SessionFailure(format!("parent close fd0 failed {:?}", e)))?;
+            close(mon_fd0)
+                .map_err(|e| SessionFailure(format!("parent close mon fd0 failed {:?}", e)))?;
+            unsafe { Ok((File::from_raw_fd(fd1), File::from_raw_fd(mon_fd1))) }
+        }
+        ForkResult::Child => {
+            close(fd1).map_err(|e| SessionFailure(format!("child close fd1 failed {:?}", e)))?;
+            close(mon_fd1)
+                .map_err(|e| SessionFailure(format!("child close mon fd1 failed {:?}", e)))?;
+
+            let mut daemon_path: Vec<u8> = Vec::with_capacity(PROC_PIDPATHINFO_MAXSIZE as usize);
+            unsafe {
+                let res = proc_pidpath(
+                    getpid().as_raw(),
+                    daemon_path.as_mut_ptr() as *mut libc::c_void,
+                    PROC_PIDPATHINFO_MAXSIZE as u32,
+                );
+                if res > 0 {
+                    daemon_path.set_len(res as usize);
+                    let daemon_path = String::from_utf8(daemon_path)
+                        .map_err(|e| SessionFailure(format!("get pid path failed {:?}", e)))?;
+                    std::env::set_var("_FUSE_DAEMON_PATH", daemon_path);
+                } else {
+                }
+            }
+
+            std::env::set_var("_FUSE_CALL_BY_LIB", "1");
+            std::env::set_var("_FUSE_COMMFD", format!("{}", fd0));
+            std::env::set_var("_FUSE_MONFD", format!("{}", mon_fd0));
+            std::env::set_var("_FUSE_COMMVERS", "2");
+
+            let mut cmd = Command::new(FUSE_NFSSRV_PATH);
+            cmd.arg("--noatime=true")
+                .arg("--noatime=true")
+                // .arg("-d")
+                // .arg("-c")
+                .args(["--volname", &format!("{}-{}", fsname, subtype)]);
+            if rd_only {
+                cmd.arg("-r");
+            }
+            cmd.arg(mountpoint);
+            cmd.exec();
+            panic!("never arrive here")
+        }
+    }
+}
+/// Umount a fuse file system
+#[cfg(feature = "fuse-t")]
+fn fuse_kern_umount(file: File) -> Result<()> {
+    let msg = b"unmount";
+    send(file.as_raw_fd(), msg, MsgFlags::empty())
+        .map_err(|e| SessionFailure(format!("send unmount failed {:?}", e)))?;
+
+    drop(file);
+
+    Ok(())
 }
 
 #[cfg(test)]

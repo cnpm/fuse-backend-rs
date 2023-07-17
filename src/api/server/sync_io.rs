@@ -649,7 +649,11 @@ impl<F: FileSystem + Sync> Server<F> {
             return ctx.reply_ok(Some(out), None);
         }
 
+        #[cfg(not(feature = "fuse-t"))]
         let mut flags_u64 = flags as u64;
+        #[cfg(feature = "fuse-t")]
+        let flags_u64 = flags as u64;
+        #[cfg(not(feature = "fuse-t"))]
         if flags_u64 & FsOptions::INIT_EXT.bits() != 0 {
             let InitIn2 { flags2, unused: _ } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
             flags_u64 |= (flags2 as u64) << 32;
