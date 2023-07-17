@@ -52,9 +52,14 @@ mod macfuse_tests {
         return Ok(stdout.to_string());
     }
 
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     #[test]
     #[cfg(feature = "fuse-t")] // it depends on privileged mode to pass through /dev/fuse
     fn integration_test_macfuse_hello() -> Result<()> {
+        init();
         // test the fuse-rs repository
         let tmp_dir = TempDir::new().unwrap();
         let mnt_dir = tmp_dir.as_path().to_str().unwrap();

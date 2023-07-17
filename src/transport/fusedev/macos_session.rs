@@ -360,7 +360,12 @@ impl FuseSession {
                             )));
                         }
                     }
-                    Err(Errno::EINTR) | Err(Errno::EBADF) => {
+                    Err(Errno::EINTR) => {
+                        trace!("read mount status get eintr");
+                        continue;
+                    }
+                    Err(Errno::EBADF) => {
+                        trace!("read mount status get ebadf");
                         continue;
                     }
                     Err(e) => {
@@ -691,8 +696,8 @@ fn fuse_kern_mount(
             let mut cmd = Command::new(FUSE_NFSSRV_PATH);
             cmd.arg("--noatime=true")
                 .arg("--noatime=true")
-                // .arg("-d")
-                // .arg("-c")
+                .arg("-d")
+                .arg("-c")
                 .args(["--volname", &format!("{}-{}", fsname, subtype)]);
             if rd_only {
                 cmd.arg("-r");

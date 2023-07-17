@@ -44,6 +44,7 @@ tokio-uring = "0.4"
 tokio-test = "0.4.2"
 vmm-sys-util = "0.10"
 vm-memory = { version = "0.9", features = ["backend-mmap", "backend-bitmap"] }
+env_logger = "*"
 
 [features]
 default = ["fusedev"]
