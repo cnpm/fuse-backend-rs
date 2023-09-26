@@ -51,6 +51,7 @@ mod file_handle;
 mod inode_store;
 mod mount_fd;
 mod os_compat;
+mod overlay;
 mod statx;
 mod sync_io;
 mod util;
