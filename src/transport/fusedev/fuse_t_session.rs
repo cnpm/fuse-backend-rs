@@ -14,7 +14,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
 use libc::{proc_pidpath, PROC_PIDPATHINFO_MAXSIZE};
@@ -23,6 +23,12 @@ use nix::sys::signal::{signal, SigHandler, Signal};
 use nix::sys::socket::{recv, send, setsockopt, SetSockOpt};
 use nix::sys::socket::{socketpair, AddressFamily, MsgFlags, SockFlag, SockType};
 use nix::unistd::{close, fork, getpid, read, ForkResult};
+
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+
+use serde_json;
+
 use vm_memory::ByteValued;
 
 use super::{
@@ -76,6 +82,12 @@ impl SetSockOpt for SndBuf {
     }
 }
 
+pub struct FileFd {
+    file: File,
+    comm_fd: i32,
+    file_lock: Arc<Mutex<()>>,
+}
+
 /// A fuse session manager to manage the connection with the in kernel fuse driver.
 pub struct FuseSession {
     mountpoint: PathBuf,
@@ -87,6 +99,8 @@ pub struct FuseSession {
     readonly: bool,
     monitor_file: Option<File>,
     wait_handle: Option<JoinHandle<Result<()>>>,
+    files: Arc<RwLock<Vec<FileFd>>>,
+    use_main: Arc<Mutex<bool>>,
 }
 
 unsafe impl Send for FuseSession {}
@@ -116,14 +130,25 @@ impl FuseSession {
             monitor_file: None,
             wait_handle: None,
             readonly,
+            files: Arc::new(RwLock::new(vec![])),
+            use_main: Arc::new(Mutex::new(false)),
         })
     }
 
     /// Mount the fuse mountpoint, building connection with the in kernel fuse driver.
     pub fn mount(&mut self) -> Result<()> {
-        let files = fuse_kern_mount(&self.mountpoint, &self.fsname, &self.subtype, self.readonly)?;
+        info!("fuse_kern_mount start");
+        let mut fs = self.files.write().unwrap();
+        let files = fuse_kern_mount(
+            &self.mountpoint,
+            &self.fsname,
+            &self.subtype,
+            self.readonly,
+            &mut fs,
+        )?;
         self.file = Some(files.0);
         self.monitor_file = Some(files.1);
+        drop(fs);
         self.wait_handle = Some(self.send_mount_command()?);
 
         Ok(())
@@ -174,11 +199,34 @@ impl FuseSession {
 
     /// Create a new fuse message channel.
     pub fn new_channel(&self) -> Result<FuseChannel> {
+        let mut can_use = self.use_main.lock().unwrap();
+        info!("can_use value is {:?}", *can_use);
+        if *can_use {
+            match self.files.read() {
+                Ok(files) => {
+                    if let Some(filefd) = files.choose(&mut thread_rng()) {
+                        let file = filefd
+                            .file
+                            .try_clone()
+                            .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
+                        let file_lock = filefd.file_lock.clone();
+                        return FuseChannel::new(file, file_lock, self.bufsize);
+                    } else {
+                        info!("get filefd failed");
+                    }
+                }
+                Err(_) => {
+                    info!("files is empty")
+                }
+            }
+        }
+        info!("use main");
         if let Some(file) = &self.file {
             let file = file
                 .try_clone()
                 .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
             let file_lock = self.file_lock.clone();
+            *can_use = true;
             FuseChannel::new(file, file_lock, self.bufsize)
         } else {
             Err(SessionFailure("invalid fuse session".to_string()))
@@ -200,12 +248,14 @@ impl FuseSession {
         Ok(())
     }
 
-    fn send_mount_command(&self) -> Result<JoinHandle<Result<()>>> {
+    fn send_mount_command(&mut self) -> Result<JoinHandle<Result<()>>> {
         let mon_fd = self
             .monitor_file
             .as_ref()
             .ok_or(SessionFailure("monitor fd is not ready".to_string()))
             .map(|f| f.as_raw_fd())?;
+
+        let shared_files = Arc::clone(&self.files);
 
         let handle = std::thread::spawn(move || {
             let msg = b"mount";
@@ -218,13 +268,17 @@ impl FuseSession {
                 match recv(mon_fd, status.as_mut_slice(), MsgFlags::empty()) {
                     Ok(_size) => {
                         return if status == 0 {
+                            let mut files = shared_files.read().expect("Failed to acquire lock");
+                            info!("create_fd_pool start");
+                            send_fd_pool_to_nfv(&mut files, mon_fd)?;
+                            drop(files);
                             Ok(())
                         } else {
                             Err(SessionFailure(format!("mount failed status: {:?}", status)))
-                        }
+                        };
                     }
                     Err(Errno::EINTR) => {
-                        trace!("read mount status get eintr");
+                        trace!("read mount status got EINTR");
                         continue;
                     }
                     Err(e) => {
@@ -333,11 +387,101 @@ impl FuseChannel {
     }
 }
 
+fn send_fd_pool_to_nfv(files: &Vec<FileFd>, mon_fd: i32) -> Result<()> {
+    let mut fd0s = vec![];
+
+    for file_fd in files.iter() {
+        fd0s.push(file_fd.comm_fd);
+    }
+
+    let json_bytes = serde_json::to_vec(&fd0s).expect("Failed to serialize");
+
+    let formatted_len = format!("{:05}", json_bytes.len());
+
+    let append_msg = format!(
+        "append: {} {}",
+        formatted_len,
+        String::from_utf8_lossy(&json_bytes)
+    );
+
+    std::thread::spawn(move || {
+        if let Err(e) = send(mon_fd, append_msg.as_bytes(), MsgFlags::empty()) {
+            return Err(SessionFailure(format!("send append fd failed {:?}", e)));
+        };
+
+        let mut status = -1;
+
+        loop {
+            match recv(mon_fd, status.as_mut_slice(), MsgFlags::empty()) {
+                Ok(_size) => {
+                    return if status == 0 {
+                        info!("create_fd_pool end");
+                        Ok(())
+                    } else {
+                        Err(SessionFailure(format!(
+                            "append fd failed status: {:?}",
+                            status
+                        )))
+                    }
+                }
+                Err(Errno::EINTR) => {
+                    trace!("read append fd status got EINTR");
+                    continue;
+                }
+                Err(e) => {
+                    return Err(SessionFailure(format!(
+                        "get append fd status failed {:?}",
+                        e
+                    )));
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+fn create_fd_pool(files: &mut Vec<FileFd>) -> Result<()> {
+    if files.len() == 0 {
+        for _ in 0..4 {
+            let (fd0, fd1) = create_fd()?;
+
+            files.push(FileFd {
+                file: unsafe { File::from_raw_fd(fd1) },
+                comm_fd: fd0,
+                file_lock: Arc::new(Mutex::new(())),
+            })
+        }
+    }
+    Ok(())
+}
+
+fn create_fd() -> Result<(i32, i32)> {
+    let (fd0, fd1) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::empty(),
+    )
+    .map_err(|e| SessionFailure(format!("create socket failed {:?}", e)))?;
+
+    setsockopt(fd0, SndBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd0 socket snd size {:?}", e)))?;
+    setsockopt(fd0, RcvBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd0 socket rcv size {:?}", e)))?;
+    setsockopt(fd1, SndBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd1 socket snd size {:?}", e)))?;
+    setsockopt(fd1, RcvBuf, &FS_SND_SIZE)
+        .map_err(|e| SessionFailure(format!("set fd1 socket rcv size {:?}", e)))?;
+    info!("fd0: {:?}, fd1: {:?}", fd0, fd1);
+    Ok((fd0, fd1))
+}
+
 fn fuse_kern_mount(
     mountpoint: &Path,
     fsname: &str,
     subtype: &str,
     rd_only: bool,
+    files: &mut Vec<FileFd>,
 ) -> Result<(File, File)> {
     unsafe { signal(Signal::SIGCHLD, SigHandler::SigDfl) }
         .map_err(|e| SessionFailure(format!("fail to reset SIGCHLD handler{:?}", e)))?;
@@ -358,6 +502,7 @@ fn fuse_kern_mount(
         .map_err(|e| SessionFailure(format!("set fd1 socket snd size {:?}", e)))?;
     setsockopt(fd1, RcvBuf, &FS_SND_SIZE)
         .map_err(|e| SessionFailure(format!("set fd1 socket rcv size {:?}", e)))?;
+    info!("fuse_kern_mount fd0: {:?}, fd1: {:?}", fd0, fd1);
 
     let (mon_fd0, mon_fd1) = socketpair(
         AddressFamily::Unix,
@@ -366,6 +511,8 @@ fn fuse_kern_mount(
         SockFlag::empty(),
     )
     .map_err(|e| SessionFailure(format!("create mon socket failed {:?}", e)))?;
+
+    create_fd_pool(files)?;
 
     let res;
     unsafe {
@@ -377,6 +524,11 @@ fn fuse_kern_mount(
             close(fd0).map_err(|e| SessionFailure(format!("parent close fd0 failed {:?}", e)))?;
             close(mon_fd0)
                 .map_err(|e| SessionFailure(format!("parent close mon fd0 failed {:?}", e)))?;
+            for f in files.iter() {
+                close(f.comm_fd).map_err(|e| {
+                    SessionFailure(format!("parent close files fd0 failed {:?}", e))
+                })?;
+            }
             unsafe { Ok((File::from_raw_fd(fd1), File::from_raw_fd(mon_fd1))) }
         }
         ForkResult::Child => {
@@ -405,6 +557,16 @@ fn fuse_kern_mount(
             std::env::set_var("_FUSE_COMMFD", format!("{}", fd0));
             std::env::set_var("_FUSE_MONFD", format!("{}", mon_fd0));
             std::env::set_var("_FUSE_COMMVERS", "2");
+
+            let mut fd0s = vec![];
+
+            for file_fd in files.iter() {
+                fd0s.push(file_fd.comm_fd);
+            }
+
+            let json = serde_json::to_string(&fd0s).expect("Failed to serialize");
+
+            std::env::set_var("_FUSE_WORKS", json);
 
             let mut cmd = Command::new(FUSE_NFSSRV_PATH);
             cmd.arg("--noatime=true")
