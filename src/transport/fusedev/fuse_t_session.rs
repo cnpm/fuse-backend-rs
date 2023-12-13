@@ -101,6 +101,7 @@ pub struct FuseSession {
     wait_handle: Option<JoinHandle<Result<()>>>,
     files: Arc<RwLock<Vec<FileFd>>>,
     use_main: Arc<Mutex<bool>>,
+    use_index: Arc<Mutex<usize>>,
 }
 
 unsafe impl Send for FuseSession {}
@@ -132,6 +133,7 @@ impl FuseSession {
             readonly,
             files: Arc::new(RwLock::new(vec![])),
             use_main: Arc::new(Mutex::new(false)),
+            use_index: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -200,20 +202,20 @@ impl FuseSession {
     /// Create a new fuse message channel.
     pub fn new_channel(&self) -> Result<FuseChannel> {
         let mut can_use = self.use_main.lock().unwrap();
+        let mut use_index = self.use_index.lock().unwrap();
         info!("can_use value is {:?}", *can_use);
         if *can_use {
             match self.files.read() {
                 Ok(files) => {
-                    if let Some(filefd) = files.choose(&mut thread_rng()) {
-                        let file = filefd
-                            .file
-                            .try_clone()
-                            .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
-                        let file_lock = filefd.file_lock.clone();
-                        return FuseChannel::new(file, file_lock, self.bufsize);
-                    } else {
-                        info!("get filefd failed");
-                    }
+                    let random_index = (*use_index + 1) % files.len();
+                    let random_f = &files[random_index];
+                    *use_index = random_index;
+                    let file = random_f
+                        .file
+                        .try_clone()
+                        .map_err(|e| SessionFailure(format!("dup fd: {}", e)))?;
+                    let file_lock = random_f.file_lock.clone();
+                    return FuseChannel::new(file, file_lock, self.bufsize);
                 }
                 Err(_) => {
                     info!("files is empty")
@@ -442,7 +444,7 @@ fn send_fd_pool_to_nfv(files: &Vec<FileFd>, mon_fd: i32) -> Result<()> {
 
 fn create_fd_pool(files: &mut Vec<FileFd>) -> Result<()> {
     if files.len() == 0 {
-        for _ in 0..4 {
+        for _ in 0..12 {
             let (fd0, fd1) = create_fd()?;
 
             files.push(FileFd {
