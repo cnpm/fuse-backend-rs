@@ -371,6 +371,10 @@ impl FuseChannel {
         let result = file_lock.lock();
         let fd = self.file.as_raw_fd();
         let size = size_of::<InHeader>();
+        let thread_id = std::thread::current().id();
+
+        info!("thread_id is {:?}, fd is {:?}", thread_id, fd);
+
         // read header
         self.read(size, 0)?;
         let in_header = InHeader::from_slice(&self.buf[0..size]);
@@ -406,40 +410,37 @@ fn send_fd_pool_to_nfv(files: &Vec<FileFd>, mon_fd: i32) -> Result<()> {
         String::from_utf8_lossy(&json_bytes)
     );
 
-    std::thread::spawn(move || {
-        if let Err(e) = send(mon_fd, append_msg.as_bytes(), MsgFlags::empty()) {
-            return Err(SessionFailure(format!("send append fd failed {:?}", e)));
-        };
+    if let Err(e) = send(mon_fd, append_msg.as_bytes(), MsgFlags::empty()) {
+        return Err(SessionFailure(format!("send append fd failed {:?}", e)));
+    };
 
-        let mut status = -1;
+    let mut status = -1;
 
-        loop {
-            match recv(mon_fd, status.as_mut_slice(), MsgFlags::empty()) {
-                Ok(_size) => {
-                    return if status == 0 {
-                        info!("create_fd_pool end");
-                        Ok(())
-                    } else {
-                        Err(SessionFailure(format!(
-                            "append fd failed status: {:?}",
-                            status
-                        )))
-                    }
-                }
-                Err(Errno::EINTR) => {
-                    trace!("read append fd status got EINTR");
-                    continue;
-                }
-                Err(e) => {
-                    return Err(SessionFailure(format!(
-                        "get append fd status failed {:?}",
-                        e
-                    )));
+    loop {
+        match recv(mon_fd, status.as_mut_slice(), MsgFlags::empty()) {
+            Ok(_size) => {
+                return if status == 0 {
+                    info!("create_fd_pool end");
+                    Ok(())
+                } else {
+                    Err(SessionFailure(format!(
+                        "append fd failed status: {:?}",
+                        status
+                    )))
                 }
             }
+            Err(Errno::EINTR) => {
+                trace!("read append fd status got EINTR");
+                continue;
+            }
+            Err(e) => {
+                return Err(SessionFailure(format!(
+                    "get append fd status failed {:?}",
+                    e
+                )));
+            }
         }
-    });
-    Ok(())
+    }
 }
 
 fn create_fd_pool(files: &mut Vec<FileFd>) -> Result<()> {
