@@ -1831,8 +1831,15 @@ impl OverlayFs {
         drop(file);
 
         if let Some(ri) = upper_real_inode {
-            ri.layer
-                .release(ctx, ri.inode, 0, upper_handle, true, true, None)?;
+            if let Err(e) = ri
+                .layer
+                .release(ctx, ri.inode, 0, upper_handle, true, true, None)
+            {
+                // Ignore ENOSYS.
+                if e.raw_os_error() != Some(libc::ENOSYS) {
+                    return Err(e);
+                }
+            }
 
             // update upper_inode and first_inode()
             node.add_upper_inode(ri, true);
