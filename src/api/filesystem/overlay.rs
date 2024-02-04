@@ -53,9 +53,9 @@ pub trait Layer: FileSystem {
         }
 
         // Try to create whiteout char device with 0/0 device number.
-        let dev = libc::makedev(0, 0);
+        let dev = unsafe { libc::makedev(0, 0) };
         let mode = libc::S_IFCHR | 0o777;
-        self.mknod(ctx, ino.into(), name, mode, dev as u32, 0)
+        self.mknod(ctx, ino.into(), name, mode as u32, dev as u32, 0)
     }
 
     /// Delete whiteout file with name <name>.
@@ -124,6 +124,8 @@ pub trait Layer: FileSystem {
 
     /// Check if the directory is opaque.
     fn is_opaque(&self, ctx: &Context, inode: Self::Inode) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        return Ok(false);
         // Use temp value to avoid moved 'parent'.
         let ino: u64 = inode.into();
 

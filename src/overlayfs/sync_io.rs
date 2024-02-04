@@ -21,7 +21,7 @@ use std::io::{Error, ErrorKind};
 impl FileSystem for OverlayFs {
     type Inode = Inode;
     type Handle = Handle;
-
+    #[cfg(target_os = "linux")]
     fn init(&self, capable: FsOptions) -> Result<FsOptions> {
         // use vfs' negotiated capability if imported
         // other wise, do our own negotiation
@@ -68,6 +68,42 @@ impl FileSystem for OverlayFs {
         Ok(opts)
     }
 
+    #[cfg(target_os = "macos")]
+    fn init(&self, _capable: FsOptions) -> Result<FsOptions> {
+        if self.config.do_import {
+            self.import()?;
+        }
+
+        let mut opts = FsOptions::ASYNC_READ | FsOptions::BIG_WRITES | FsOptions::ATOMIC_O_TRUNC;
+
+        if self.config.do_import {
+            self.import()?;
+        }
+
+        if !self.config.do_import || self.config.writeback {
+            self.writeback.store(true, Ordering::Relaxed);
+        }
+
+        if !self.config.do_import || self.config.no_open {
+            opts.remove(FsOptions::ATOMIC_O_TRUNC);
+            self.no_open.store(true, Ordering::Relaxed);
+        }
+
+        if !self.config.do_import || self.config.no_opendir {
+            self.no_opendir.store(true, Ordering::Relaxed);
+        }
+
+        if !self.config.do_import || self.config.killpriv_v2 {
+            self.killpriv_v2.store(true, Ordering::Relaxed);
+        }
+
+        if self.config.perfile_dax {
+            self.perfile_dax.store(true, Ordering::Relaxed);
+        }
+
+        Ok(opts)
+    }
+
     fn destroy(&self) {}
 
     fn statfs(&self, ctx: &Context, inode: Inode) -> Result<statvfs64> {
@@ -107,6 +143,8 @@ impl FileSystem for OverlayFs {
     ) -> Result<(Option<Handle>, OpenOptions)> {
         trace!("OPENDIR: inode: {}\n", inode);
         if self.no_opendir.load(Ordering::Relaxed) {
+            #[cfg(target_os = "macos")]
+            return Ok((None, OpenOptions::KEEP_CACHE));
             info!("fuse: opendir is not supported.");
             return Err(Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -249,6 +287,8 @@ impl FileSystem for OverlayFs {
         // open assume file always exist
         trace!("OPEN: inode: {}, flags: {}\n", inode, flags);
         if self.no_open.load(Ordering::Relaxed) {
+            #[cfg(target_os = "macos")]
+            return Ok((None, OpenOptions::KEEP_CACHE, None));
             info!("fuse: open is not supported.");
             return Err(Error::from_raw_os_error(libc::ENOSYS));
         }
@@ -389,7 +429,10 @@ impl FileSystem for OverlayFs {
         let mut hargs = args;
         let mut flags: i32 = args.flags as i32;
         flags |= libc::O_NOFOLLOW;
-        flags &= !libc::O_DIRECT;
+        #[cfg(target_os = "linux")]
+        {
+            flags &= !libc::O_DIRECT;
+        }
         if self.config.writeback {
             if flags & libc::O_ACCMODE == libc::O_WRONLY {
                 flags &= !libc::O_ACCMODE;

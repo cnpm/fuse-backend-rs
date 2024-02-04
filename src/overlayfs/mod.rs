@@ -718,7 +718,7 @@ impl OverlayInode {
                         Some((mode, umask)) => {
                             parent_ri.mkdir(ctx, self.name.as_str(), mode, umask)?
                         }
-                        None => parent_ri.mkdir(ctx, self.name.as_str(), st.st_mode, 0)?,
+                        None => parent_ri.mkdir(ctx, self.name.as_str(), st.st_mode.into(), 0)?,
                     };
                     // create directory here
                     child.replace(ri);
@@ -1752,7 +1752,7 @@ impl OverlayFs {
         // create the file in upper layer using information from lower layer
         let args = CreateIn {
             flags: libc::O_WRONLY as u32,
-            mode: st.st_mode,
+            mode: st.st_mode.into(),
             umask: 0,
             fuse_flags: 0,
         };
@@ -2187,7 +2187,7 @@ impl ZeroCopyWriter for File {
         let mut buf = vec![0_u8; count];
         let slice = unsafe { FileVolatileSlice::from_raw_ptr(buf.as_mut_ptr(), count) };
         // Read from f at offset off to slice.
-        let ret = f.read_at_volatile(slice, off)?;
+        let ret = f.read_vectored_at_volatile(&vec![slice], off)?;
 
         if ret > 0 {
             let slice = unsafe { FileVolatileSlice::from_raw_ptr(buf.as_mut_ptr(), ret) };

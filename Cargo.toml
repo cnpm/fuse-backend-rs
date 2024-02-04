@@ -36,6 +36,7 @@ virtio-queue = { version = "0.7", optional = true }
 vhost = { version = "0.6", features = ["vhost-user-slave"], optional = true }
 versionize_derive = { version = "0.1.6", optional = true }
 versionize = { version = "0.1.10", optional = true }
+tempfile = "3.2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation-sys = { version = ">=0.8", optional = true }
@@ -48,8 +49,6 @@ tokio-uring = { version = "0.4.0", optional = true }
 tokio-test = "0.4.2"
 vmm-sys-util = "0.11"
 vm-memory = { version = "0.10", features = ["backend-mmap", "backend-bitmap"] }
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-tempfile = "3.2.0"
 
 [features]
 default = ["fusedev"]

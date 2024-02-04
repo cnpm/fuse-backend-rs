@@ -802,12 +802,13 @@ mod tests {
     use crate::api::filesystem::*;
     #[cfg(target_os = "linux")]
     use crate::api::{Vfs, VfsOptions};
-
+    #[cfg(target_os = "linux")]
     use caps::{CapSet, Capability};
     use log;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::ops::Deref;
     use std::os::unix::prelude::MetadataExt;
+    use tempfile::tempfile;
 
     #[cfg(target_os = "macos")]
     use std::fs;
@@ -1506,17 +1507,28 @@ mod tests {
 
     #[test]
     fn test_generic_read_write_noopen() {
+        #[cfg(target_os = "linux")]
         let tmpdir = TempDir::new().expect("Cannot create temporary directory.");
+        #[cfg(target_os = "macos")]
+        let source = tempdir().expect("Cannot create temporary directory.");
+        #[cfg(target_os = "macos")]
+        let tmp_path = source.into_path();
         // Prepare passthrough fs.
         let fs_cfg = Config {
             do_import: false,
             no_open: true,
+            #[cfg(target_os = "linux")]
             root_dir: tmpdir.as_path().to_string_lossy().to_string(),
+            #[cfg(target_os = "macos")]
+            root_dir: tmp_path.to_string_lossy().to_string(),
             ..Default::default()
         };
         let fs = PassthroughFs::<()>::new(fs_cfg.clone()).unwrap();
         fs.import().unwrap();
+        #[cfg(target_os = "linux")]
         fs.init(FsOptions::ZERO_MESSAGE_OPEN).unwrap();
+        #[cfg(target_os = "macos")]
+        fs.init(FsOptions::ASYNC_READ).unwrap();
         fs.mount().unwrap();
 
         // Create a new file for testing.
@@ -1539,8 +1551,12 @@ mod tests {
         // Write on the inode
         let data = b"hello world";
         // Write to one intermidiate temp file.
+        #[cfg(target_os = "linux")]
         let buffer_file = TempFile::new().expect("Cannot create temporary file.");
+        #[cfg(target_os = "linux")]
         let mut buffer_file = buffer_file.into_file();
+        #[cfg(target_os = "macos")]
+        let mut buffer_file = tempfile().expect("Cannot create temporary file.");
         buffer_file.write_all(data).unwrap();
         let _ = buffer_file.flush();
 
@@ -1569,8 +1585,12 @@ mod tests {
         assert_eq!(write_sz, data.len());
 
         // Create a new temp file as read buffer.
+        #[cfg(target_os = "linux")]
         let read_buffer_file = TempFile::new().expect("Cannot create temporary file.");
+        #[cfg(target_os = "linux")]
         let mut read_buffer_file = read_buffer_file.into_file();
+        #[cfg(target_os = "macos")]
+        let mut read_buffer_file = tempfile().expect("Cannot create temporary file.");
         let read_sz = fs
             .read(
                 &ctx,

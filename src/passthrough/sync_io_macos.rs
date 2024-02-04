@@ -1,17 +1,30 @@
-use std::{
-    io, mem,
-    os::fd::{AsRawFd, RawFd},
-};
-
-use vm_memory::bitmap::BitmapSlice;
-
 use crate::{
     api::{filesystem::DirEntry, CURRENT_DIR_CSTR, PARENT_DIR_CSTR},
     bytes_to_cstr,
     passthrough::util::einval,
 };
+use std::ffi::CStr;
+use std::ptr;
+use std::{
+    io,
+    mem::{self, size_of},
+    os::fd::{AsRawFd, RawFd},
+};
+use vm_memory::bitmap::BitmapSlice;
+use vm_memory::ByteValued;
 
 use super::{Handle, Inode, OffT, PassthroughFs};
+
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MacosDirent64 {
+    pub d_ino: u64,
+    pub d_seekoff: u64,
+    pub d_reclen: u16,
+    pub d_namlen: u16,
+    pub d_type: u8,
+}
+unsafe impl ByteValued for MacosDirent64 {}
 
 impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
     pub fn do_readdir(
@@ -51,7 +64,45 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
                 )
             };
             if res < 0 {
-                return Err(io::Error::last_os_error());
+                let err = io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(libc::EISDIR) => {
+                        let dir = unsafe { libc::fdopendir(dir.as_raw_fd()) };
+                        loop {
+                            let entry_ptr = unsafe { libc::readdir(dir) };
+
+                            if entry_ptr.is_null() {
+                                break;
+                            }
+
+                            let entry: libc::dirent = unsafe { ptr::read(entry_ptr) };
+
+                            let cstr = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) };
+                            let name_str = cstr.to_str().expect("Failed to convert CStr to str");
+                            let res = if name_str == "." || name_str == ".." {
+                                Ok(1)
+                            } else {
+                                add_entry(
+                                    DirEntry {
+                                        ino: entry.d_ino,
+                                        offset: entry.d_seekoff,
+                                        type_: entry.d_type as u32,
+                                        name: cstr.to_bytes(),
+                                    },
+                                    data.borrow_fd().as_raw_fd(),
+                                )
+                            };
+                            match res {
+                                Ok(0) => break,
+                                Ok(_) => continue,
+                                Err(_) => return Ok(()),
+                            }
+                        }
+                        unsafe { libc::closedir(dir) };
+                        return Ok(());
+                    }
+                    _ => return Err(err),
+                }
             }
 
             // Safe because we trust the value returned by kernel.

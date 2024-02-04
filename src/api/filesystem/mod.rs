@@ -30,9 +30,15 @@ pub use async_io::{AsyncFileSystem, AsyncZeroCopyReader, AsyncZeroCopyWriter};
 mod sync_io;
 pub use sync_io::FileSystem;
 
-#[cfg(all(any(feature = "fusedev", feature = "virtiofs"), target_os = "linux"))]
+#[cfg(all(
+    any(feature = "fusedev", feature = "virtiofs"),
+    any(target_os = "macos", target_os = "linux")
+))]
 mod overlay;
-#[cfg(all(any(feature = "fusedev", feature = "virtiofs"), target_os = "linux"))]
+#[cfg(all(
+    any(feature = "fusedev", feature = "virtiofs"),
+    any(target_os = "macos", target_os = "linux")
+))]
 pub use overlay::Layer;
 
 /// Information about a path in the filesystem.
