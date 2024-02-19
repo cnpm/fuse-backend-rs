@@ -806,9 +806,9 @@ mod tests {
     use caps::{CapSet, Capability};
     use log;
     use std::io::{Read, Seek, SeekFrom, Write};
+    #[cfg(target_os = "linux")]
     use std::ops::Deref;
     use std::os::unix::prelude::MetadataExt;
-    use tempfile::tempfile;
 
     #[cfg(target_os = "macos")]
     use std::fs;
@@ -819,7 +819,7 @@ mod tests {
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
     #[cfg(target_os = "macos")]
-    use tempfile::{tempdir, tempdir_in, NamedTempFile};
+    use tempfile::{tempdir, tempdir_in, tempfile, NamedTempFile};
 
     #[cfg(target_os = "linux")]
     fn prepare_passthroughfs() -> PassthroughFs {
