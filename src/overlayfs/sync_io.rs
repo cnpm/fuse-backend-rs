@@ -145,7 +145,9 @@ impl FileSystem for OverlayFs {
         if self.no_opendir.load(Ordering::Relaxed) {
             #[cfg(target_os = "macos")]
             return Ok((None, OpenOptions::KEEP_CACHE));
+            #[cfg(target_os = "linux")]
             info!("fuse: opendir is not supported.");
+            #[cfg(target_os = "linux")]
             return Err(Error::from_raw_os_error(libc::ENOSYS));
         }
 
@@ -289,7 +291,9 @@ impl FileSystem for OverlayFs {
         if self.no_open.load(Ordering::Relaxed) {
             #[cfg(target_os = "macos")]
             return Ok((None, OpenOptions::KEEP_CACHE, None));
+            #[cfg(target_os = "linux")]
             info!("fuse: open is not supported.");
+            #[cfg(target_os = "linux")]
             return Err(Error::from_raw_os_error(libc::ENOSYS));
         }
 

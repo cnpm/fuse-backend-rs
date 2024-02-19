@@ -7,12 +7,16 @@
 use std::ffi::{CStr, CString};
 use std::io::{Error, ErrorKind, Result};
 
-use super::{Context, Entry, FileSystem, GetxattrReply};
+#[cfg(target_os = "linux")]
+use super::GetxattrReply;
+use super::{Context, Entry, FileSystem};
 use crate::abi::fuse_abi::stat64;
-
+#[cfg(target_os = "linux")]
 pub const OPAQUE_XATTR_LEN: u32 = 16;
 pub const OPAQUE_XATTR: &str = "user.fuseoverlayfs.opaque";
+#[cfg(target_os = "linux")]
 pub const UNPRIVILEGED_OPAQUE_XATTR: &str = "user.overlay.opaque";
+#[cfg(target_os = "linux")]
 pub const PRIVILEGED_OPAQUE_XATTR: &str = "trusted.overlay.opaque";
 
 /// A filesystem must implement Layer trait, or it cannot be used as an OverlayFS layer.
@@ -53,9 +57,15 @@ pub trait Layer: FileSystem {
         }
 
         // Try to create whiteout char device with 0/0 device number.
+        #[cfg(target_os = "linux")]
+        let dev = libc::makedev(0, 0);
+        #[cfg(target_os = "macos")]
         let dev = unsafe { libc::makedev(0, 0) };
         let mode = libc::S_IFCHR | 0o777;
-        self.mknod(ctx, ino.into(), name, mode as u32, dev as u32, 0)
+        #[cfg(target_os = "macos")]
+        return self.mknod(ctx, ino.into(), name, mode as u32, dev as u32, 0);
+        #[cfg(target_os = "linux")]
+        return self.mknod(ctx, ino.into(), name, mode, dev as u32, 0);
     }
 
     /// Delete whiteout file with name <name>.
@@ -122,10 +132,14 @@ pub trait Layer: FileSystem {
         )
     }
 
+    #[cfg(target_os = "macos")]
+    fn is_opaque(&self, _ctx: &Context, _inode: Self::Inode) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Check if the directory is opaque.
+    #[cfg(target_os = "linux")]
     fn is_opaque(&self, ctx: &Context, inode: Self::Inode) -> Result<bool> {
-        #[cfg(target_os = "macos")]
-        return Ok(false);
         // Use temp value to avoid moved 'parent'.
         let ino: u64 = inode.into();
 
