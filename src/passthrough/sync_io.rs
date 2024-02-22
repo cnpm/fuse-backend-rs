@@ -365,6 +365,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         let data = self.inode_map.get(parent)?;
 
         let res = {
+            #[cfg(target_os = "linux")]
             let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
             let file = data.get_file()?;
@@ -509,6 +510,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         let dir_file = dir.get_file()?;
 
         let new_file = {
+            #[cfg(target_os = "linux")]
             let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
             let flags = self.get_writeback_open_flags(args.flags as i32);
@@ -532,6 +534,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
                     None
                 };
 
+                #[cfg(target_os = "linux")]
                 let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
                 self.open_inode(entry.inode, args.flags as i32)?
             }
@@ -946,6 +949,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         let pathname = data.get_path()?;
 
         let res = {
+            #[cfg(target_os = "linux")]
             let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
             // Safe because this doesn't modify any memory and we check the return value.
@@ -1031,6 +1035,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         let data = self.inode_map.get(parent)?;
 
         let res = {
+            #[cfg(target_os = "linux")]
             let (_uid, _gid) = set_creds(ctx.uid, ctx.gid)?;
 
             let file = data.get_file()?;
