@@ -39,7 +39,8 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
         let data = self.get_dirdata(handle, inode, libc::O_RDONLY)?;
 
         let (_guard, dir) = data.get_file_mut();
-        if dir.metadata()?.is_dir() {
+
+        if !dir.metadata()?.is_dir() {
             return Ok(());
         }
         // Safe because this doesn't modify any memory and we check the return value.
