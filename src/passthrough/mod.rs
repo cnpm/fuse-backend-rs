@@ -198,15 +198,29 @@ pub struct HandleData {
     file: File,
     lock: Mutex<()>,
     open_flags: AtomicU32,
+    #[cfg(target_os = "macos")]
+    dir_ptr: Option<usize>,
 }
 
 impl HandleData {
     fn new(inode: Inode, file: File, flags: u32) -> Self {
+        #[cfg(target_os = "macos")]
+        let mut dir_ptr = None;
+        #[cfg(target_os = "macos")]
+        if let Ok(metadata) = file.metadata() {
+            if metadata.is_dir() {
+                let dir = unsafe { libc::fdopendir(file.as_raw_fd()) };
+                dir_ptr = Some(dir as usize);
+            }
+        }
+
         HandleData {
             inode,
             file,
             lock: Mutex::new(()),
             open_flags: AtomicU32::new(flags),
+            #[cfg(target_os = "macos")]
+            dir_ptr: dir_ptr,
         }
     }
 
@@ -216,6 +230,11 @@ impl HandleData {
 
     fn get_file_mut(&self) -> (MutexGuard<()>, &File) {
         (self.lock.lock().unwrap(), &self.file)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_dir_ptr(&self) -> Option<usize> {
+        self.dir_ptr
     }
 
     fn borrow_fd(&self) -> BorrowedFd {

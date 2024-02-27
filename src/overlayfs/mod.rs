@@ -270,7 +270,6 @@ impl RealInode {
         let mut more = true;
         let mut offset = 0;
         let bufsize = 1024;
-        #[cfg(target_os = "linux")]
         while more {
             more = false;
             self.layer.readdir(
@@ -296,29 +295,6 @@ impl RealInode {
                 },
             )?;
         }
-        #[cfg(target_os = "macos")]
-        self.layer.readdir(
-            ctx,
-            self.inode,
-            handle,
-            bufsize,
-            offset,
-            &mut |d| -> Result<usize> {
-                more = true;
-                offset = d.offset;
-                let child_name = String::from_utf8_lossy(d.name).into_owned();
-
-                trace!("entry: {}", child_name.as_str());
-
-                if child_name.eq(CURRENT_DIR) || child_name.eq(PARENT_DIR) {
-                    return Ok(1);
-                }
-
-                child_names.push(child_name);
-
-                Ok(1)
-            },
-        )?;
 
         // Non-zero handle indicates successful 'open', we should 'release' it.
         if handle > 0 {

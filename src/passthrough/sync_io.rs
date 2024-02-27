@@ -1092,6 +1092,12 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         // behavior by doing the same thing (dup-ing the fd and then immediately closing it). Safe
         // because this doesn't modify any memory and we check the return values.
         unsafe {
+            #[cfg(target_os = "macos")]
+            if let Some(u_ptr) = data.get_dir_ptr() {
+                let dir = u_ptr as *mut libc::DIR;
+                libc::closedir(dir);
+            }
+
             let newfd = libc::dup(data.borrow_fd().as_raw_fd());
             if newfd < 0 {
                 return Err(io::Error::last_os_error());

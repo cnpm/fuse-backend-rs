@@ -43,44 +43,47 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
         if !dir.metadata()?.is_dir() {
             return Ok(());
         }
-        // Safe because this doesn't modify any memory and we check the return value.
-        let res = unsafe { libc::lseek(dir.as_raw_fd(), offset as OffT, libc::SEEK_SET) };
-        if res < 0 {
-            return Err(io::Error::last_os_error());
+
+        if let Some(u_ptr) = data.get_dir_ptr() {
+            let dir = u_ptr as *mut libc::DIR;
+
+            unsafe { libc::seekdir(dir, offset as libc::c_long) };
+
+            let mut loc = 0;
+
+            loop {
+                let entry_ptr = unsafe { libc::readdir(dir) };
+
+                if entry_ptr.is_null() {
+                    break;
+                }
+
+                let entry: libc::dirent = unsafe { ptr::read(entry_ptr) };
+
+                let cstr = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) };
+                let name_str = cstr.to_str().expect("Failed to convert CStr to str");
+                if name_str == "." || name_str == ".." {
+                    loc = unsafe { libc::telldir(dir) };
+                    continue;
+                } else {
+                    loc = unsafe { libc::telldir(dir) };
+                    if loc as u64 > offset {
+                        let _ = add_entry(
+                            DirEntry {
+                                ino: entry.d_ino,
+                                offset: loc as u64,
+                                type_: entry.d_type as u32,
+                                name: cstr.to_bytes(),
+                            },
+                            data.borrow_fd().as_raw_fd(),
+                        );
+
+                        break;
+                    }
+                };
+            }
         }
 
-        let dir = unsafe { libc::fdopendir(dir.as_raw_fd()) };
-        loop {
-            let entry_ptr = unsafe { libc::readdir(dir) };
-
-            if entry_ptr.is_null() {
-                break;
-            }
-
-            let entry: libc::dirent = unsafe { ptr::read(entry_ptr) };
-
-            let cstr = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) };
-            let name_str = cstr.to_str().expect("Failed to convert CStr to str");
-            let res = if name_str == "." || name_str == ".." {
-                Ok(1)
-            } else {
-                add_entry(
-                    DirEntry {
-                        ino: entry.d_ino,
-                        offset: entry.d_seekoff,
-                        type_: entry.d_type as u32,
-                        name: cstr.to_bytes(),
-                    },
-                    data.borrow_fd().as_raw_fd(),
-                )
-            };
-            match res {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(_) => return Ok(()),
-            }
-        }
-        unsafe { libc::closedir(dir) };
-        Ok(())
+        return Ok(());
     }
 }
